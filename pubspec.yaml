@@ -1,0 +1,17 @@
+name: bytesized
+description: Image Compression and Decompression App
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  image_picker: ^1.0.7
+  flutter_image_compress: ^2.1.0
+  image: ^4.8.0
+
+flutter:
+  uses-material-design: true
