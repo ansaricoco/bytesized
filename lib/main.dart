@@ -1,9 +1,13 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
 import 'package:flutter_image_compress/flutter_image_compress.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'image_utils_stub.dart'
     if (dart.library.html) 'image_utils_web.dart';
@@ -119,7 +123,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                   const SizedBox(width: 16),
-                  const _ViewSourceButton(),
                 ],
               ),
               const SizedBox(height: 32),
@@ -219,40 +222,6 @@ class _DashedBorderPainter extends CustomPainter {
   @override
   bool shouldRepaint(_DashedBorderPainter old) => old.color != color;
 }
-
-// ─────────────────────────────────────────────
-// VIEW SOURCE BUTTON
-// ─────────────────────────────────────────────
-class _ViewSourceButton extends StatelessWidget {
-  const _ViewSourceButton();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1C),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withOpacity(0.12)),
-      ),
-      child: TextButton.icon(
-        onPressed: () {},
-        icon: Icon(Icons.code_rounded,
-            size: 15, color: Colors.white.withOpacity(0.8)),
-        label: Text('View Source',
-            style: TextStyle(
-                color: Colors.white.withOpacity(0.8),
-                fontSize: 13,
-                fontWeight: FontWeight.w500)),
-        style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        ),
-      ),
-    );
-  }
-}
-
 // ─────────────────────────────────────────────
 // CHOOSE ACTION DIALOG
 // ─────────────────────────────────────────────
@@ -481,12 +450,48 @@ class _ResultScreenState extends State<ResultScreen> {
     }
   }
 
-  void _save() {
+  Future<void> _save() async {
     if (_resultBytes == null) return;
     final isCompress = widget.mode == ActionMode.compress;
     final ext = isCompress ? '.webp' : '.${widget.fileName.split('.').last}';
     final outName = 'compressed_${DateTime.now().millisecondsSinceEpoch}$ext';
-    downloadBytes(_resultBytes!, outName);
+    
+    if (kIsWeb) {
+      downloadBytes(_resultBytes!, outName);
+    } else {
+      try {
+        final tempDir = await getTemporaryDirectory();
+        final file = File('${tempDir.path}/$outName');
+        await file.writeAsBytes(_resultBytes!);
+        await Gal.putImage(file.path);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Image saved to gallery!')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error saving image: $e')),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _share() async {
+    if (_resultBytes == null) return;
+    final isCompress = widget.mode == ActionMode.compress;
+    final ext = isCompress ? '.webp' : '.${widget.fileName.split('.').last}';
+    final outName = 'compressed_${DateTime.now().millisecondsSinceEpoch}$ext';
+    
+    final xFile = XFile.fromData(
+      _resultBytes!,
+      name: outName,
+      mimeType: isCompress ? 'image/webp' : 'image/${ext.substring(1)}',
+    );
+    
+    await Share.shareXFiles([xFile], text: 'Check out this image processed with ByteSized!');
   }
 
   @override
@@ -630,7 +635,7 @@ class _ResultScreenState extends State<ResultScreen> {
                   icon: const Icon(Icons.download_rounded, size: 18),
                   label: const Text('Download WebP'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF2563EB),
+                    backgroundColor: const Color.fromARGB(255, 53, 53, 53),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(
@@ -638,9 +643,47 @@ class _ResultScreenState extends State<ResultScreen> {
                     elevation: 0,
                     textStyle: const TextStyle(
                         fontSize: 15, fontWeight: FontWeight.w600),
+                      ),
+                    ),
                   ),
-                ),
-              ),
+                  const SizedBox(height: 12), // Adds a small gap between the buttons
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _share,
+                      icon: const Icon(Icons.share_rounded, size: 18),
+                      label: const Text('Share Image'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color.fromARGB(255, 53, 53, 53),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                        elevation: 0,
+                        textStyle: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12), // Adds a small gap between the buttons
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () => Navigator.of(context).popUntil((route) => route.isFirst),
+                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      label: const Text('New Image'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color.fromARGB(255, 53, 53, 53),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                        elevation: 0,
+                        textStyle: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ),
             ],
           ],
         ),
