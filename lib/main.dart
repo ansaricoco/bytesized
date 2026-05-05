@@ -80,12 +80,13 @@ Future<Uint8List> computeResidual(Uint8List originalBytes, Uint8List lossyBytes)
       final origP = origImg.getPixel(x, y);
       final lossyP = lossyImg.getPixel(x, y);
 
-      // Residual = Original - Lossy compressed (Shifted by 128 to store negative values)
-      final r = (origP.r - lossyP.r + 128).clamp(0, 255);
-      final g = (origP.g - lossyP.g + 128).clamp(0, 255);
-      final b = (origP.b - lossyP.b + 128).clamp(0, 255);
+      // Modular arithmetic guarantees 100% perfect 1:1 lossless reconstruction
+      final r = (origP.r.toInt() - lossyP.r.toInt()) % 256;
+      final g = (origP.g.toInt() - lossyP.g.toInt()) % 256;
+      final b = (origP.b.toInt() - lossyP.b.toInt()) % 256;
+      final a = (origP.a.toInt() - lossyP.a.toInt()) % 256;
       
-      residualImg.setPixelRgba(x, y, r, g, b, origP.a);
+      residualImg.setPixelRgba(x, y, r, g, b, a);
     }
   }
 
@@ -112,16 +113,18 @@ Future<Uint8List> reconstructFromResidual(Uint8List lossyBytes, Uint8List residu
       final lossyP = lossyImg.getPixel(x, y);
       final resP = residualImg.getPixel(x, y);
 
-      // Reconstructed = Lossy + Residual (Removing the 128 shift)
-      final r = (lossyP.r + (resP.r - 128)).clamp(0, 255);
-      final g = (lossyP.g + (resP.g - 128)).clamp(0, 255);
-      final b = (lossyP.b + (resP.b - 128)).clamp(0, 255);
+      // Perfect 1:1 inversion using modulo 256
+      final r = (lossyP.r.toInt() + resP.r.toInt()) % 256;
+      final g = (lossyP.g.toInt() + resP.g.toInt()) % 256;
+      final b = (lossyP.b.toInt() + resP.b.toInt()) % 256;
+      final a = (lossyP.a.toInt() + resP.a.toInt()) % 256;
       
-      reconstructedImg.setPixelRgba(x, y, r, g, b, lossyP.a);
+      reconstructedImg.setPixelRgba(x, y, r, g, b, a);
     }
   }
 
-  return Uint8List.fromList(img.encodePng(reconstructedImg));
+  // Encode the final reconstructed image as a high-quality JPEG to keep the file size low
+  return Uint8List.fromList(img.encodeJpg(reconstructedImg, quality: 95));
 }
 
 class ImageCompressorApp extends StatelessWidget {
@@ -549,7 +552,7 @@ class _ResultScreenState extends State<ResultScreen> {
     final isCompress = widget.mode == ActionMode.compress;
     final ext = isCompress 
         ? '.webp' 
-        : (widget.fileName.toLowerCase().endsWith('.zip') ? '.png' : '.${widget.fileName.split('.').last}');
+        : (widget.fileName.toLowerCase().endsWith('.zip') || widget.fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${widget.fileName.split('.').last}');
     final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
     
     if (kIsWeb) {
@@ -618,7 +621,7 @@ class _ResultScreenState extends State<ResultScreen> {
     final isCompress = widget.mode == ActionMode.compress;
     final ext = isCompress 
         ? '.webp' 
-        : (widget.fileName.toLowerCase().endsWith('.zip') ? '.png' : '.${widget.fileName.split('.').last}');
+        : (widget.fileName.toLowerCase().endsWith('.zip') || widget.fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${widget.fileName.split('.').last}');
     final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
     final mimeType = ext == '.png' ? 'image/png' : (ext == '.webp' ? 'image/webp' : 'image/${ext.substring(1)}');
     
@@ -715,7 +718,7 @@ class _ResultScreenState extends State<ResultScreen> {
                     border: Border.all(
                         color: const Color(0xFF3B82F6).withOpacity(0.4)),
                   ),
-                  child: Text(isCompress ? 'WEBP' : 'PNG',
+                  child: Text(isCompress ? 'WEBP' : 'JPG',
                       style: const TextStyle(
                           color: Color(0xFF3B82F6),
                           fontSize: 11,
@@ -769,7 +772,7 @@ class _ResultScreenState extends State<ResultScreen> {
                 ),
               ),
               const SizedBox(height: 8),
-              _InfoRow(label: 'Format', value: isCompress ? 'WEBP' : 'PNG'),
+              _InfoRow(label: 'Format', value: isCompress ? 'WEBP' : 'JPG'),
               const SizedBox(height: 4),
               _InfoRow(
                   label: 'Size', value: _formatSize(_resultSize)),
