@@ -4,7 +4,9 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:image/image.dart' as img;
+import 'package:archive/archive.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -14,6 +16,17 @@ import 'image_utils_stub.dart'
 
 void main() {
   runApp(const ImageCompressorApp());
+}
+
+Future<Directory?> getAppSaveDirectory() async {
+  if (kIsWeb) return null;
+  if (Platform.isAndroid) {
+    return Directory('/storage/emulated/0/Download');
+  } else if (Platform.isIOS) {
+    return await getApplicationDocumentsDirectory();
+  } else {
+    return await getDownloadsDirectory();
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -32,8 +45,83 @@ Future<Uint8List> encodeToWebP(Uint8List inputBytes) async {
     inputBytes,
     format: CompressFormat.webp,
     quality: 80,
+    minWidth: 16383,
+    minHeight: 16383,
   );
   return result;
+}
+
+// ─────────────────────────────────────────────
+// LOSSY PLUS RESIDUAL CODING (DLPR SIMULATION)
+// ─────────────────────────────────────────────
+// Here we simulate the algorithmic portion of DLPR (Deep Lossy Plus Residual).
+// While a full DLPR system uses a neural network to model residuals efficiently,
+// this mathematically demonstrates the exact formulation:
+// Residual = Original - Lossy, and Reconstructed = Lossy + Residual.
+
+Future<Uint8List> computeResidual(Uint8List originalBytes, Uint8List lossyBytes) async {
+  final origImg = img.decodeImage(originalBytes);
+  var lossyImg = img.decodeImage(lossyBytes);
+
+  if (origImg == null || lossyImg == null) {
+    throw Exception('Failed to decode images for residual computation');
+  }
+
+  // If the lossy compressor resized or rotated the image, we must scale it 
+  // back to match the exact original dimensions to do pixel-by-pixel math.
+  if (origImg.width != lossyImg.width || origImg.height != lossyImg.height) {
+    lossyImg = img.copyResize(lossyImg, width: origImg.width, height: origImg.height);
+  }
+
+  final residualImg = img.Image(width: origImg.width, height: origImg.height);
+
+  for (int y = 0; y < origImg.height; y++) {
+    for (int x = 0; x < origImg.width; x++) {
+      final origP = origImg.getPixel(x, y);
+      final lossyP = lossyImg.getPixel(x, y);
+
+      // Residual = Original - Lossy compressed (Shifted by 128 to store negative values)
+      final r = (origP.r - lossyP.r + 128).clamp(0, 255);
+      final g = (origP.g - lossyP.g + 128).clamp(0, 255);
+      final b = (origP.b - lossyP.b + 128).clamp(0, 255);
+      
+      residualImg.setPixelRgba(x, y, r, g, b, origP.a);
+    }
+  }
+
+  return Uint8List.fromList(img.encodePng(residualImg));
+}
+
+Future<Uint8List> reconstructFromResidual(Uint8List lossyBytes, Uint8List residualBytes) async {
+  var lossyImg = img.decodeImage(lossyBytes);
+  final residualImg = img.decodeImage(residualBytes);
+
+  if (lossyImg == null || residualImg == null) {
+    throw Exception('Failed to decode images for reconstruction');
+  }
+
+  // Ensure lossy image is scaled to match the residual's full dimensions
+  if (lossyImg.width != residualImg.width || lossyImg.height != residualImg.height) {
+    lossyImg = img.copyResize(lossyImg, width: residualImg.width, height: residualImg.height);
+  }
+
+  final reconstructedImg = img.Image(width: residualImg.width, height: residualImg.height);
+
+  for (int y = 0; y < residualImg.height; y++) {
+    for (int x = 0; x < residualImg.width; x++) {
+      final lossyP = lossyImg.getPixel(x, y);
+      final resP = residualImg.getPixel(x, y);
+
+      // Reconstructed = Lossy + Residual (Removing the 128 shift)
+      final r = (lossyP.r + (resP.r - 128)).clamp(0, 255);
+      final g = (lossyP.g + (resP.g - 128)).clamp(0, 255);
+      final b = (lossyP.b + (resP.b - 128)).clamp(0, 255);
+      
+      reconstructedImg.setPixelRgba(x, y, r, g, b, lossyP.a);
+    }
+  }
+
+  return Uint8List.fromList(img.encodePng(reconstructedImg));
 }
 
 class ImageCompressorApp extends StatelessWidget {
@@ -69,21 +157,85 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final ImagePicker _picker = ImagePicker();
+  List<File> _recentFiles = [];
+  bool _loadingHistory = true;
 
-  Future<void> _pickImage() async {
-    final XFile? file = await _picker.pickImage(source: ImageSource.gallery);
-    if (file != null && mounted) {
-      final bytes = await file.readAsBytes();
-      _showChooseActionDialog(bytes, file.name);
+  @override
+  void initState() {
+    super.initState();
+    _loadRecentFiles();
+  }
+
+  Future<void> _loadRecentFiles() async {
+    if (kIsWeb) {
+      setState(() => _loadingHistory = false);
+      return;
+    }
+    try {
+      final dir = await getAppSaveDirectory();
+      if (dir != null && await dir.exists()) {
+        final files = dir.listSync().whereType<File>().where((file) {
+          final name = file.path.toLowerCase();
+          return name.contains('compressed_') && 
+                 (name.endsWith('.webp') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg'));
+        }).toList();
+        
+        files.sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
+        
+        if (mounted) {
+          setState(() {
+            _recentFiles = files;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Error loading history: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _loadingHistory = false);
+      }
     }
   }
 
-  void _showChooseActionDialog(Uint8List bytes, String fileName) {
-    showDialog(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.7),
-      builder: (_) => ChooseActionDialog(imageBytes: bytes, fileName: fileName),
+  Future<void> _pickImage(ActionMode mode) async {
+    if (mode == ActionMode.compress) {
+      final XFile? file = await _picker.pickImage(source: ImageSource.gallery);
+      if (file != null && mounted) {
+        final bytes = await file.readAsBytes();
+        await _navigateToResult(bytes, file.name, mode);
+      }
+    } else {
+      // Use file_picker for decompression to allow selecting .zip archives
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+      );
+      
+      if (result != null && mounted) {
+        final file = result.files.single;
+        Uint8List? bytes = file.bytes;
+        if (bytes == null && file.path != null) {
+          bytes = await File(file.path!).readAsBytes();
+        }
+        
+        if (bytes != null) {
+          await _navigateToResult(bytes, file.name, mode);
+        }
+      }
+    }
+  }
+
+  Future<void> _navigateToResult(Uint8List bytes, String fileName, ActionMode mode) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ResultScreen(
+          imageBytes: bytes,
+          fileName: fileName,
+          mode: mode,
+        ),
+      ),
     );
+    _loadRecentFiles(); // Reload when returning from ResultScreen
   }
 
   @override
@@ -126,183 +278,99 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
               const SizedBox(height: 32),
-              Expanded(
-                child: GestureDetector(
-                  onTap: _pickImage,
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: CustomPaint(
-                      painter: _DashedBorderPainter(
-                        color: Colors.white.withOpacity(0.25),
-                      ),
-                      child: Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.upload_rounded,
-                                size: 40,
-                                color: Colors.white.withOpacity(0.55)),
-                            const SizedBox(height: 16),
-                            const Text(
-                              'Drop an image here or click to upload',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'Supports JPG, PNG, WebP',
-                              style: TextStyle(
-                                color: Colors.white.withOpacity(0.4),
-                                fontSize: 12.5,
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                            ElevatedButton(
-                              onPressed: _pickImage,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF2563EB),
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 28, vertical: 13),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8)),
-                                elevation: 0,
-                                textStyle: const TextStyle(
-                                    fontSize: 14, fontWeight: FontWeight.w600),
-                              ),
-                              child: const Text('Select Image'),
-                            ),
-                          ],
-                        ),
-                      ),
+              Row(
+                children: [
+                  Expanded(
+                    child: _ActionCard(
+                      label: 'Compress',
+                      subtitle: 'Convert to WebP',
+                      icon: Icons.compress_rounded,
+                      iconColor: const Color(0xFF3B82F6),
+                      onTap: () => _pickImage(ActionMode.compress),
                     ),
                   ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _ActionCard(
+                      label: 'Decompress',
+                      subtitle: 'Reconstruct original',
+                      icon: Icons.open_in_full_rounded,
+                      iconColor: const Color(0xFF22C55E),
+                      onTap: () => _pickImage(ActionMode.decompress),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 32),
+              const Text(
+                'Recent Files',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
                 ),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: _loadingHistory
+                    ? const Center(child: CircularProgressIndicator())
+                    : _recentFiles.isEmpty
+                        ? Center(
+                            child: Text(
+                              'No recent images found.',
+                              style: TextStyle(color: Colors.white.withOpacity(0.4)),
+                            ),
+                          )
+                        : GridView.builder(
+                            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 2,
+                              crossAxisSpacing: 12,
+                              mainAxisSpacing: 12,
+                              childAspectRatio: 1,
+                            ),
+                            itemCount: _recentFiles.length,
+                            itemBuilder: (context, index) {
+                              final file = _recentFiles[index];
+                              return ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    Image.file(
+                                      file,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => Container(
+                                        color: const Color(0xFF1A1A1A),
+                                        child: const Icon(Icons.broken_image, color: Colors.white54),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      bottom: 0, left: 0, right: 0,
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [Colors.black.withOpacity(0.8), Colors.transparent],
+                                            begin: Alignment.bottomCenter,
+                                            end: Alignment.topCenter,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          file.path.split(Platform.pathSeparator).last,
+                                          style: const TextStyle(color: Colors.white, fontSize: 10),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────
-// DASHED BORDER PAINTER
-// ─────────────────────────────────────────────
-class _DashedBorderPainter extends CustomPainter {
-  final Color color;
-  _DashedBorderPainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 1.5
-      ..style = PaintingStyle.stroke;
-    const dashWidth = 6.0;
-    const dashSpace = 5.0;
-    final path = Path()
-      ..addRRect(RRect.fromRectAndRadius(
-          Offset.zero & size, const Radius.circular(12)));
-    for (final metric in path.computeMetrics()) {
-      double distance = 0;
-      while (distance < metric.length) {
-        canvas.drawPath(
-            metric.extractPath(distance, distance + dashWidth), paint);
-        distance += dashWidth + dashSpace;
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(_DashedBorderPainter old) => old.color != color;
-}
-// ─────────────────────────────────────────────
-// CHOOSE ACTION DIALOG
-// ─────────────────────────────────────────────
-class ChooseActionDialog extends StatelessWidget {
-  final Uint8List imageBytes;
-  final String fileName;
-
-  const ChooseActionDialog(
-      {super.key, required this.imageBytes, required this.fileName});
-
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
-      backgroundColor: const Color(0xFF1A1A1A),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Choose Action',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w700)),
-            const SizedBox(height: 6),
-            const Text('What would you like to do with this image?',
-                style: TextStyle(color: Color(0xFF818CF8), fontSize: 13.5)),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: _ActionCard(
-                    label: 'Compress',
-                    subtitle: 'Convert to WebP',
-                    icon: Icons.compress_rounded,
-                    iconColor: const Color(0xFF3B82F6),
-                    onTap: () {
-                      Navigator.pop(context);
-                      Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                              builder: (_) => ResultScreen(
-                                  imageBytes: imageBytes,
-                                  fileName: fileName,
-                                  mode: ActionMode.compress)));
-                    },
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _ActionCard(
-                    label: 'Decompress',
-                    subtitle: 'View original',
-                    icon: Icons.open_in_full_rounded,
-                    iconColor: const Color(0xFF22C55E),
-                    onTap: () {
-                      Navigator.pop(context);
-                      Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                              builder: (_) => ResultScreen(
-                                  imageBytes: imageBytes,
-                                  fileName: fileName,
-                                  mode: ActionMode.decompress)));
-                    },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Center(
-              child: TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: Text('Cancel',
-                    style: TextStyle(
-                        color: Colors.white.withOpacity(0.55), fontSize: 14)),
-              ),
-            ),
-          ],
         ),
       ),
     );
@@ -396,6 +464,7 @@ class ResultScreen extends StatefulWidget {
 class _ResultScreenState extends State<ResultScreen> {
   bool _processing = false;
   Uint8List? _resultBytes;
+  Uint8List? _residualBytes;
   String? _errorMsg;
 
   int get _originalSize => widget.imageBytes.length;
@@ -425,6 +494,7 @@ class _ResultScreenState extends State<ResultScreen> {
       _processing = true;
       _errorMsg = null;
       _resultBytes = null;
+      _residualBytes = null;
     });
 
     try {
@@ -433,9 +503,33 @@ class _ResultScreenState extends State<ResultScreen> {
       if (widget.mode == ActionMode.compress) {
         // Real WebP encoding via pure Dart `image` package — works on all platforms
         result = await encodeToWebP(widget.imageBytes);
+        // Calculate residual for potential zipping
+        _residualBytes = await computeResidual(widget.imageBytes, result);
       } else {
-        // Decompress: just return original bytes
-        result = widget.imageBytes;
+        // Decompress: Handle ZIP metadata or direct image
+        if (widget.fileName.toLowerCase().endsWith('.zip')) {
+          final archive = ZipDecoder().decodeBytes(widget.imageBytes);
+          ArchiveFile? lossyFile;
+          ArchiveFile? residualFile;
+
+          for (final file in archive) {
+            if (file.name == 'image.webp') lossyFile = file;
+            if (file.name == 'residual.png') residualFile = file;
+          }
+
+          if (lossyFile != null && residualFile != null) {
+            final lossyBytes = Uint8List.fromList(lossyFile.content as List<int>);
+            final resBytes = Uint8List.fromList(residualFile.content as List<int>);
+            result = await reconstructFromResidual(lossyBytes, resBytes);
+          } else if (lossyFile != null) {
+            result = Uint8List.fromList(lossyFile.content as List<int>);
+          } else {
+            throw Exception('Invalid ZIP format: missing image.webp');
+          }
+        } else {
+          // Decompress what it can (lossy output)
+          result = widget.imageBytes;
+        }
       }
 
       setState(() {
@@ -453,20 +547,27 @@ class _ResultScreenState extends State<ResultScreen> {
   Future<void> _save() async {
     if (_resultBytes == null) return;
     final isCompress = widget.mode == ActionMode.compress;
-    final ext = isCompress ? '.webp' : '.${widget.fileName.split('.').last}';
-    final outName = 'compressed_${DateTime.now().millisecondsSinceEpoch}$ext';
+    final ext = isCompress 
+        ? '.webp' 
+        : (widget.fileName.toLowerCase().endsWith('.zip') ? '.png' : '.${widget.fileName.split('.').last}');
+    final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
     
     if (kIsWeb) {
       downloadBytes(_resultBytes!, outName);
     } else {
       try {
-        final tempDir = await getTemporaryDirectory();
-        final file = File('${tempDir.path}/$outName');
+        final saveDir = await getAppSaveDirectory();
+        final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+        final file = File('$dirPath/$outName');
         await file.writeAsBytes(_resultBytes!);
-        await Gal.putImage(file.path);
+        
+        try {
+          await Gal.putImage(file.path);
+        } catch (_) {}
+        
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Image saved to gallery!')),
+            const SnackBar(content: Text('Image saved successfully!')),
           );
         }
       } catch (e) {
@@ -479,16 +580,52 @@ class _ResultScreenState extends State<ResultScreen> {
     }
   }
 
+  Future<void> _saveZip() async {
+    if (_resultBytes == null || _residualBytes == null) return;
+    
+    final archive = Archive();
+    archive.addFile(ArchiveFile('image.webp', _resultBytes!.length, _resultBytes!));
+    archive.addFile(ArchiveFile('residual.png', _residualBytes!.length, _residualBytes!));
+    
+    final zipBytes = ZipEncoder().encode(archive);
+
+    final outName = 'compressed_with_residual_${DateTime.now().millisecondsSinceEpoch}.zip';
+
+    if (kIsWeb) {
+      downloadBytes(Uint8List.fromList(zipBytes), outName);
+    } else {
+      try {
+        final saveDir = await getAppSaveDirectory();
+        final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+        final file = File('$dirPath/$outName');
+        await file.writeAsBytes(zipBytes);
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('ZIP saved to Downloads folder')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error saving ZIP: $e')));
+        }
+      }
+    }
+  }
+
   Future<void> _share() async {
     if (_resultBytes == null) return;
     final isCompress = widget.mode == ActionMode.compress;
-    final ext = isCompress ? '.webp' : '.${widget.fileName.split('.').last}';
-    final outName = 'compressed_${DateTime.now().millisecondsSinceEpoch}$ext';
+    final ext = isCompress 
+        ? '.webp' 
+        : (widget.fileName.toLowerCase().endsWith('.zip') ? '.png' : '.${widget.fileName.split('.').last}');
+    final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
+    final mimeType = ext == '.png' ? 'image/png' : (ext == '.webp' ? 'image/webp' : 'image/${ext.substring(1)}');
     
     final xFile = XFile.fromData(
       _resultBytes!,
       name: outName,
-      mimeType: isCompress ? 'image/webp' : 'image/${ext.substring(1)}',
+      mimeType: mimeType,
     );
     
     await Share.shareXFiles([xFile], text: 'Check out this image processed with ByteSized!');
@@ -504,7 +641,7 @@ class _ResultScreenState extends State<ResultScreen> {
         backgroundColor: const Color(0xFF0A0A0A),
         foregroundColor: Colors.white,
         title: Text(
-          isCompress ? 'Compress to WebP' : 'Original Image',
+          isCompress ? 'Compress to WebP' : 'Reconstructed (Lossy + Residual)',
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
         elevation: 0,
@@ -514,22 +651,40 @@ class _ResultScreenState extends State<ResultScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Original
-            const Text('Original',
+            // Input File
+            const Text('Input File',
                 style: TextStyle(
                     color: Colors.white,
                     fontSize: 14,
                     fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.memory(
-                widget.imageBytes,
+            if (widget.fileName.toLowerCase().endsWith('.zip'))
+              Container(
                 width: double.infinity,
                 height: 200,
-                fit: BoxFit.cover,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A1A),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.folder_zip_rounded, size: 64, color: Color(0xFF818CF8)),
+                    SizedBox(height: 12),
+                    Text('ZIP Archive metadata', style: TextStyle(color: Colors.white70)),
+                  ],
+                ),
+              )
+            else
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.memory(
+                  widget.imageBytes,
+                  width: double.infinity,
+                  height: 200,
+                  fit: BoxFit.cover,
+                ),
               ),
-            ),
             const SizedBox(height: 8),
             _InfoRow(
                 label: 'Format',
@@ -545,8 +700,8 @@ class _ResultScreenState extends State<ResultScreen> {
             // Result
             Row(
               children: [
-                const Text('WebP Output',
-                    style: TextStyle(
+                Text(isCompress ? 'WebP Output' : 'Reconstructed Output',
+                    style: const TextStyle(
                         color: Colors.white,
                         fontSize: 14,
                         fontWeight: FontWeight.w600)),
@@ -560,8 +715,8 @@ class _ResultScreenState extends State<ResultScreen> {
                     border: Border.all(
                         color: const Color(0xFF3B82F6).withOpacity(0.4)),
                   ),
-                  child: const Text('WEBP',
-                      style: TextStyle(
+                  child: Text(isCompress ? 'WEBP' : 'PNG',
+                      style: const TextStyle(
                           color: Color(0xFF3B82F6),
                           fontSize: 11,
                           fontWeight: FontWeight.w700)),
@@ -577,15 +732,15 @@ class _ResultScreenState extends State<ResultScreen> {
                   color: const Color(0xFF1A1A1A),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Center(
+                child: Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      CircularProgressIndicator(
+                      const CircularProgressIndicator(
                           color: Color(0xFF3B82F6), strokeWidth: 2),
-                      SizedBox(height: 12),
-                      Text('Converting to WebP...',
-                          style: TextStyle(
+                      const SizedBox(height: 12),
+                      Text(isCompress ? 'Converting to WebP...' : 'Reconstructing image...',
+                          style: const TextStyle(
                               color: Colors.white54, fontSize: 13)),
                     ],
                   ),
@@ -614,7 +769,7 @@ class _ResultScreenState extends State<ResultScreen> {
                 ),
               ),
               const SizedBox(height: 8),
-              _InfoRow(label: 'Format', value: 'WEBP'),
+              _InfoRow(label: 'Format', value: isCompress ? 'WEBP' : 'PNG'),
               const SizedBox(height: 4),
               _InfoRow(
                   label: 'Size', value: _formatSize(_resultSize)),
@@ -633,7 +788,7 @@ class _ResultScreenState extends State<ResultScreen> {
                 child: ElevatedButton.icon(
                   onPressed: _save,
                   icon: const Icon(Icons.download_rounded, size: 18),
-                  label: const Text('Download WebP'),
+                  label: Text(isCompress ? 'Download WebP' : 'Download Image'),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color.fromARGB(255, 53, 53, 53),
                     foregroundColor: Colors.white,
@@ -647,6 +802,27 @@ class _ResultScreenState extends State<ResultScreen> {
                     ),
                   ),
                   const SizedBox(height: 12), // Adds a small gap between the buttons
+                  if (isCompress && _residualBytes != null) ...[
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _saveZip,
+                        icon: const Icon(Icons.archive_rounded, size: 18),
+                        label: const Text('Download ZIP (WebP + Residual)'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color.fromARGB(255, 53, 53, 53),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8)),
+                          elevation: 0,
+                          textStyle: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
