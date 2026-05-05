@@ -11,20 +11,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:bytesized/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
+  testWidgets('App renders home screen smoke test', (WidgetTester tester) async {
     // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(const ImageCompressorApp());
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    // Wait for any animations or async state updates to finish (like _loadRecentFiles)
+    await tester.pumpAndSettle();
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // Verify that the title is present.
+    expect(find.text('Image Compressor'), findsOneWidget);
+    
+    // Verify that the main action buttons are present.
+    expect(find.text('Compress'), findsOneWidget);
+    expect(find.text('Decompress'), findsOneWidget);
   });
 }
