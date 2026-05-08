@@ -309,11 +309,13 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
             else
               ClipRRect(
                 borderRadius: BorderRadius.circular(10),
-                child: Image.memory(
-                  widget.imageBytes,
-                  width: double.infinity,
-                  height: 200,
-                  fit: BoxFit.cover,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 400),
+                  child: Image.memory(
+                    widget.imageBytes,
+                    width: double.infinity,
+                    fit: BoxFit.contain,
+                  ),
                 ),
               ),
             const SizedBox(height: 8),
@@ -392,11 +394,13 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
             else if (_resultBytes != null) ...[
               ClipRRect(
                 borderRadius: BorderRadius.circular(10),
-                child: Image.memory(
-                  _resultBytes!,
-                  width: double.infinity,
-                  height: 200,
-                  fit: BoxFit.cover,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 400),
+                  child: Image.memory(
+                    _resultBytes!,
+                    width: double.infinity,
+                    fit: BoxFit.contain,
+                  ),
                 ),
               ),
               const SizedBox(height: 8),
