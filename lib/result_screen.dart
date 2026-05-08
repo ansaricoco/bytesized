@@ -260,7 +260,11 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
         ? '.webp' 
         : (widget.fileName.toLowerCase().endsWith('.zip') || widget.fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${widget.fileName.split('.').last}');
     final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
-    final mimeType = ext == '.png' ? 'image/png' : (ext == '.webp' ? 'image/webp' : 'image/${ext.substring(1)}');
+    final mimeType = ext == '.png' 
+        ? 'image/png' 
+        : (ext == '.webp' 
+            ? 'image/webp' 
+            : (ext == '.jpg' || ext == '.jpeg' ? 'image/jpeg' : 'image/${ext.substring(1)}'));
     
     final xFile = XFile.fromData(
       _resultBytes!,
