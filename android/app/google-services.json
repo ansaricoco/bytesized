@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "273442439217",
+    "project_id": "bytesized-f1578",
+    "storage_bucket": "bytesized-f1578.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:273442439217:android:2be71a1f4149f357bcd510",
+        "android_client_info": {
+          "package_name": "com.example.bytesized"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBO5J7uxEWnvuSTsfQC2U1pBt1LTcFFrAI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

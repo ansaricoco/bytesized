@@ -1,0 +1,27 @@
+// This is a basic Flutter widget test.
+//
+// To perform an interaction with a widget in your test, use the WidgetTester
+// utility in the flutter_test package. For example, you can send tap and scroll
+// gestures. You can also use WidgetTester to find child widgets in the widget
+// tree, read text, and verify that the values of widget properties are correct.
+
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:bytesized/main.dart';
+
+void main() {
+  testWidgets('App renders home screen smoke test', (WidgetTester tester) async {
+    // Build our app and trigger a frame.
+    await tester.pumpWidget(const ImageCompressorApp());
+
+    // Wait for any animations or async state updates to finish (like _loadRecentFiles)
+    await tester.pumpAndSettle();
+
+    // Verify that the title is present.
+    expect(find.text('Image Compressor'), findsOneWidget);
+    
+    // Verify that the main action buttons are present.
+    expect(find.text('Compress'), findsOneWidget);
+    expect(find.text('Decompress'), findsOneWidget);
+  });
+}
