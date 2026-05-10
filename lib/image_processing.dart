@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show kIsWeb, compute;
 import 'package:flutter_image_compress/flutter_image_compress.dart';
+import 'package:bytesized/app_preset.dart';
 import 'package:image/image.dart' as img;
 
 // ─────────────────────────────────────────────
@@ -10,8 +11,8 @@ import 'package:image/image.dart' as img;
 // ─────────────────────────────────────────────
 Future<Uint8List> encodeToWebP(Uint8List inputBytes, {int quality = 80}) async {
   if (kIsWeb) {
-    // Web: re-encode as PNG (best we can do without native codec)
-    return compute(_encodeFallbackTask, inputBytes);
+    // Web: use pure Dart encoder to support quality settings
+    return compute(_encodeFallbackTask, {'bytes': inputBytes, 'quality': quality});
   }
   // Android/iOS: flutter_image_compress gives real WebP
   final result = await FlutterImageCompress.compressWithList(
@@ -24,10 +25,33 @@ Future<Uint8List> encodeToWebP(Uint8List inputBytes, {int quality = 80}) async {
   return result;
 }
 
-Uint8List _encodeFallbackTask(Uint8List inputBytes) {
+/// Compresses an image while attempting to stay under the preset's [maxSize].
+Future<Uint8List> compressWithPreset(Uint8List inputBytes, AppPreset preset) async {
+  int currentQuality = preset.quality;
+  Uint8List compressed = await encodeToWebP(inputBytes, quality: currentQuality);
+
+  // Check if the result is already within the limit
+  if (compressed.lengthInBytes <= preset.maxSize) {
+    return compressed;
+  }
+
+  // Iteratively reduce quality if the file is still too large
+  // In a production app, you might also consider downscaling dimensions 
+  // if quality reduction isn't enough.
+  while (compressed.lengthInBytes > preset.maxSize && currentQuality > 10) {
+    currentQuality -= 10;
+    compressed = await encodeToWebP(inputBytes, quality: currentQuality);
+  }
+
+  return compressed;
+}
+
+Uint8List _encodeFallbackTask(Map<String, dynamic> data) {
+  final Uint8List inputBytes = data['bytes'];
+  final int quality = data['quality'];
   final decoded = img.decodeImage(inputBytes);
   if (decoded == null) throw Exception('Could not decode image');
-  return Uint8List.fromList(img.encodePng(decoded));
+  return img.encodePng(decoded);
 }
 
 // ─────────────────────────────────────────────
@@ -72,7 +96,7 @@ Uint8List _computeResidualTask(Map<String, Uint8List> data) {
     }
   }
 
-  return Uint8List.fromList(img.encodePng(residualImg));
+  return img.encodePng(residualImg);
 }
 
 Future<Uint8List> reconstructFromResidual(Uint8List lossyBytes, Uint8List residualBytes) async {
@@ -113,5 +137,5 @@ Uint8List _reconstructTask(Map<String, Uint8List> data) {
   }
 
   // Encode the final reconstructed image as a high-quality JPEG to keep the file size low
-  return Uint8List.fromList(img.encodeJpg(reconstructedImg, quality: 95));
+  return img.encodeJpg(reconstructedImg, quality: 95);
 }

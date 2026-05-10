@@ -26,26 +26,14 @@ class AppPreset {
         description: "8MB limit (free)",
       ),
       AppPreset(
-        name: "Telegram",
-        maxSize: 10 * 1024 * 1024,
-        quality: 80,
-        description: "10MB limit",
-      ),
-      AppPreset(
         name: "Instagram",
         maxSize: 8 * 1024 * 1024,
         quality: 80,
         description: "8MB limit",
       ),
       AppPreset(
-        name: "Twitter/X",
-        maxSize: 5 * 1024 * 1024,
-        quality: 65,
-        description: "5MB limit",
-      ),
-      AppPreset(
         name: "Messenger",
-        maxSize: 1024 * 1024,
+        maxSize: 25 * 1024 * 1024,
         quality: 60,
         description: "25MB",
       ),
