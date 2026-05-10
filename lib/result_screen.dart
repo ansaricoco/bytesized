@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
@@ -11,6 +12,20 @@ import '../app_preset.dart';
 import '../image_utils_stub.dart' if (dart.library.html) '../image_utils_web.dart';
 import 'package:bytesized/file_utils.dart';
 import 'package:bytesized/image_processing.dart';
+
+// ─────────────────────────────────────────────
+// TOP LEVEL COMPUTE TASKS FOR WEB SUPPORT
+// ─────────────────────────────────────────────
+List<int>? _encodeZipTask(Map<String, Uint8List> data) {
+  final archive = Archive();
+  archive.addFile(ArchiveFile('image.webp', data['result']!.length, data['result']!));
+  archive.addFile(ArchiveFile('residual.png', data['residual']!.length, data['residual']!));
+  return ZipEncoder().encode(archive);
+}
+
+Archive _decodeZipTask(Uint8List bytes) {
+  return ZipDecoder().decodeBytes(bytes);
+}
 
 // ─────────────────────────────────────────────
 // RESULT SCREEN
@@ -148,7 +163,7 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
       } else {
         // Decompress: Handle ZIP metadata or direct image
         if (widget.fileName.toLowerCase().endsWith('.zip')) {
-          final archive = ZipDecoder().decodeBytes(widget.imageBytes);
+          final archive = await compute(_decodeZipTask, widget.imageBytes);
           ArchiveFile? lossyFile;
           ArchiveFile? residualFile;
 
@@ -223,11 +238,16 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
   Future<void> _saveZip() async {
     if (_resultBytes == null || _residualBytes == null) return;
     
-    final archive = Archive();
-    archive.addFile(ArchiveFile('image.webp', _resultBytes!.length, _resultBytes!));
-    archive.addFile(ArchiveFile('residual.png', _residualBytes!.length, _residualBytes!));
-    
-    final zipBytes = ZipEncoder().encode(archive);
+    final resultBytes = _resultBytes!;
+    final residualBytes = _residualBytes!;
+
+    // Offload heavy ZIP encoding to a background worker safe for Web/Desktop
+    final zipBytesNullable = await compute(_encodeZipTask, {
+      'result': resultBytes,
+      'residual': residualBytes,
+    });
+    if (zipBytesNullable == null) return;
+    final zipBytes = zipBytesNullable;
 
     final outName = 'compressed_with_residual_${DateTime.now().millisecondsSinceEpoch}.zip';
 

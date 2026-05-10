@@ -19,8 +19,8 @@ Future<Uint8List> encodeToWebP(Uint8List inputBytes, {int quality = 80}) async {
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
-    minWidth: 16383,
-    minHeight: 16383,
+    minWidth: 4096, // Reduced from 16383 to prevent OOM on massive images
+    minHeight: 4096,
   );
   return result;
 }
@@ -51,7 +51,9 @@ Uint8List _encodeFallbackTask(Map<String, dynamic> data) {
   final int quality = data['quality'];
   final decoded = img.decodeImage(inputBytes);
   if (decoded == null) throw Exception('Could not decode image');
-  return img.encodePng(decoded);
+  
+  // Encode as JPG so the quality parameter is respected and the file shrinks!
+  return img.encodeJpg(decoded, quality: quality);
 }
 
 // ─────────────────────────────────────────────
@@ -70,7 +72,7 @@ Uint8List _computeResidualTask(Map<String, Uint8List> data) {
   var lossyImg = img.decodeImage(lossyBytes);
 
   if (origImg == null || lossyImg == null) {
-    throw Exception('Failed to decode images for residual computation');
+    throw Exception('Process failed!');
   }
 
   // If the lossy compressor resized or rotated the image, we must scale it 
@@ -111,7 +113,7 @@ Uint8List _reconstructTask(Map<String, Uint8List> data) {
   final residualImg = img.decodeImage(residualBytes);
 
   if (lossyImg == null || residualImg == null) {
-    throw Exception('Failed to decode images for reconstruction');
+    throw Exception('Reconstruction failed!');
   }
 
   // Ensure lossy image is scaled to match the residual's full dimensions
