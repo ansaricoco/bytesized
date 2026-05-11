@@ -16,10 +16,16 @@ import 'package:bytesized/image_processing.dart';
 // ─────────────────────────────────────────────
 // TOP LEVEL COMPUTE TASKS FOR WEB SUPPORT
 // ─────────────────────────────────────────────
-List<int>? _encodeZipTask(Map<String, Uint8List> data) {
+List<int>? _encodeZipTask(Map<String, dynamic> data) {
   final archive = Archive();
-  archive.addFile(ArchiveFile('image.webp', data['result']!.length, data['result']!));
-  archive.addFile(ArchiveFile('residual.png', data['residual']!.length, data['residual']!));
+  final result = data['result'] as Uint8List;
+  final residual = data['residual'] as Uint8List;
+  archive.addFile(ArchiveFile('image.webp', result.length, result));
+  archive.addFile(ArchiveFile('residual.png', residual.length, residual));
+  if (data['original'] != null) {
+    final original = data['original'] as Uint8List;
+    archive.addFile(ArchiveFile('original_image', original.length, original));
+  }
   return ZipEncoder().encode(archive);
 }
 
@@ -60,6 +66,8 @@ class _ResultScreenState extends State<ResultScreen> {
   late List<String?> _errorMsgList;
   late List<String?> _inputResolutionList;
   late List<String?> _resultResolutionList;
+  late List<double?> _mseList;
+  late List<double?> _ssimList;
 
   @override
   void dispose() {
@@ -77,6 +85,8 @@ class _ResultScreenState extends State<ResultScreen> {
     _errorMsgList = List.filled(count, null);
     _inputResolutionList = List.filled(count, null);
     _resultResolutionList = List.filled(count, null);
+    _mseList = List.filled(count, null);
+    _ssimList = List.filled(count, null);
 
     for (int i = 0; i < count; i++) {
       _fetchInputResolution(i);
@@ -103,24 +113,39 @@ class _ResultScreenState extends State<ResultScreen> {
         final quality = widget.preset?.quality ?? 80;
         result = await encodeToWebP(imageBytes, quality: quality);
         final residual = await computeResidual(imageBytes, result);
+        
+        final metrics = await computeImageMetrics(imageBytes, result);
+
         if (mounted) {
-          setState(() => _residualBytesList[index] = residual);
+          setState(() {
+            _residualBytesList[index] = residual;
+            _mseList[index] = metrics['mse'];
+            _ssimList[index] = metrics['ssim'];
+          });
         }
       } else {
         if (fileName.toLowerCase().endsWith('.zip')) {
           final archive = await compute(_decodeZipTask, imageBytes);
           ArchiveFile? lossyFile;
           ArchiveFile? residualFile;
+          ArchiveFile? originalFile;
 
           for (final file in archive) {
             if (file.name == 'image.webp') lossyFile = file;
             if (file.name == 'residual.png') residualFile = file;
+            if (file.name == 'original_image') originalFile = file;
           }
 
           if (lossyFile != null && residualFile != null) {
             final lossyBytes = Uint8List.fromList(lossyFile.content as List<int>);
             final resBytes = Uint8List.fromList(residualFile.content as List<int>);
             result = await reconstructFromResidual(lossyBytes, resBytes);
+            
+            if (originalFile != null) {
+              final origBytes = Uint8List.fromList(originalFile.content as List<int>);
+              final metrics = await computeImageMetrics(origBytes, result);
+              if (mounted) setState(() { _mseList[index] = metrics['mse']; _ssimList[index] = metrics['ssim']; });
+            }
           } else if (lossyFile != null) {
             result = Uint8List.fromList(lossyFile.content as List<int>);
           } else {
@@ -200,6 +225,7 @@ class _ResultScreenState extends State<ResultScreen> {
     final zipBytesNullable = await compute(_encodeZipTask, {
       'result': resultBytes,
       'residual': residualBytes,
+      'original': widget.imageBytesList[index],
     });
     if (zipBytesNullable == null) return;
     final zipBytes = zipBytesNullable;
@@ -362,6 +388,8 @@ class _ResultScreenState extends State<ResultScreen> {
             errorMsg: _errorMsgList[index],
             inputResolution: _inputResolutionList[index],
             resultResolution: _resultResolutionList[index],
+            mse: _mseList[index],
+            ssim: _ssimList[index],
             onSave: () => _save(index),
             onSaveZip: () => _saveZip(index),
             onShare: () => _share(index),
@@ -384,6 +412,8 @@ class _ResultItemView extends StatelessWidget {
   final String? errorMsg;
   final String? inputResolution;
   final String? resultResolution;
+  final double? mse;
+  final double? ssim;
 
   final VoidCallback onSave;
   final VoidCallback onSaveZip;
@@ -401,6 +431,8 @@ class _ResultItemView extends StatelessWidget {
     required this.errorMsg,
     required this.inputResolution,
     required this.resultResolution,
+    required this.mse,
+    required this.ssim,
     required this.onSave,
     required this.onSaveZip,
     required this.onShare,
@@ -563,6 +595,15 @@ class _ResultItemView extends StatelessWidget {
               if (resultResolution != null) ...[
                 const SizedBox(height: 4),
                 _InfoRow(label: 'Resolution', value: resultResolution!),
+              ],
+              if (mse != null && ssim != null) ...[
+                const SizedBox(height: 4),
+                _InfoRow(label: 'MSE (vs Original)', value: mse!.toStringAsFixed(2)),
+                const SizedBox(height: 4),
+                _InfoRow(label: 'SSIM (vs Original)', value: ssim!.toStringAsFixed(4)),
+              ] else if (!isCompress) ...[
+                const SizedBox(height: 4),
+                const _InfoRow(label: 'Metrics', value: 'Original missing in ZIP', valueColor: Colors.white54),
               ],
               const SizedBox(height: 4),
               _InfoRow(
