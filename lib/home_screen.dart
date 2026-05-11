@@ -81,7 +81,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } else {
       // Use file_picker for decompression to allow selecting .zip archives
-      final result = await FilePicker.platform.pickFiles(
+      final result = await FilePicker.pickFiles(
         type: FileType.any,
         allowMultiple: true,
       );
