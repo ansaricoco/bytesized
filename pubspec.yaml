@@ -9,18 +9,23 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # Using environment variables for keys is safer than hardcoding them.
+  flutter_dotenv: ^5.1.0
   image_picker: ^1.0.7
-  file_picker: ^12.0.0-beta.1
-  flutter_image_compress: ^2.1.0
+  file_picker: ^6.2.0 # Updated from beta to latest stable
+  flutter_image_compress: ^2.3.0 # Updated to latest
   image: ^4.2.0
-  gal: ^2.3.2
-  path_provider: ^2.1.5
-  share_plus: ^13.1.0
+  gal: 2.3.2 # Updated to latest
+  path_provider: ^2.1.5 # Already recent
+  share_plus: ^9.0.0 # Updated to latest
+  supabase_flutter: ^2.5.3 # Updated to latest
+  archive: ^3.5.1 # Updated to latest
+  url_launcher: ^6.3.0
+  app_links: ^7.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
-
 flutter:
   uses-material-design: true

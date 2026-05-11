@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../app_preset.dart';
+import 'package:bytesized/app_preset.dart';
 import 'package:bytesized/file_utils.dart';
 import 'result_screen.dart';
 
@@ -81,7 +81,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } else {
       // Use file_picker for decompression to allow selecting .zip archives
-      final result = await FilePicker.pickFiles(
+      final result = await FilePicker.platform.pickFiles(
         type: FileType.any,
         allowMultiple: true,
       );

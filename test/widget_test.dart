@@ -6,10 +6,22 @@
 // tree, read text, and verify that the values of widget properties are correct.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:bytesized/main.dart';
 
 void main() {
+  // Initialize Supabase once for all tests in this file. This prevents
+  // errors if widgets try to access Supabase.instance before it's ready.
+  setUpAll(() async {
+    // Use dummy values for testing. It's not necessary to connect to a real
+    // Supabase instance for this widget smoke test.
+    await Supabase.initialize(
+      url: 'https://test.supabase.co',
+      anonKey: 'test-key',
+    );
+  });
+
   testWidgets('App renders home screen smoke test', (WidgetTester tester) async {
     // Build our app and trigger a frame.
     await tester.pumpWidget(const ImageCompressorApp());
@@ -19,7 +31,7 @@ void main() {
 
     // Verify that the title is present.
     expect(find.text('Image Compressor'), findsOneWidget);
-    
+
     // Verify that the main action buttons are present.
     expect(find.text('Compress'), findsOneWidget);
     expect(find.text('Decompress'), findsOneWidget);

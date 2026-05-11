@@ -19,7 +19,7 @@ Future<Uint8List> encodeToWebP(Uint8List inputBytes, {int quality = 80}) async {
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
-    minWidth: 4096, // Reduced from 16383 to prevent OOM on massive images
+    minWidth: 4096, // Match the 4096 native downsample limit to prevent upscaling inflation
     minHeight: 4096,
   );
   return result;
@@ -68,23 +68,23 @@ Uint8List _computeResidualTask(Map<String, Uint8List> data) {
   final originalBytes = data['orig']!;
   final lossyBytes = data['lossy']!;
   
-  final origImg = img.decodeImage(originalBytes);
+  var origImg = img.decodeImage(originalBytes);
   var lossyImg = img.decodeImage(lossyBytes);
 
   if (origImg == null || lossyImg == null) {
     throw Exception('Process failed!');
   }
 
-  // If the lossy compressor resized or rotated the image, we must scale it 
-  // back to match the exact original dimensions to do pixel-by-pixel math.
+  // CRITICAL FIX: Scale the original image DOWN to the lossy image's dimensions.
+  // Upscaling the lossy image to massive original dimensions causes huge OOM crashes.
   if (origImg.width != lossyImg.width || origImg.height != lossyImg.height) {
-    lossyImg = img.copyResize(lossyImg, width: origImg.width, height: origImg.height);
+    origImg = img.copyResize(origImg, width: lossyImg.width, height: lossyImg.height);
   }
 
-  final residualImg = img.Image(width: origImg.width, height: origImg.height);
+  final residualImg = img.Image(width: lossyImg.width, height: lossyImg.height);
 
-  for (int y = 0; y < origImg.height; y++) {
-    for (int x = 0; x < origImg.width; x++) {
+  for (int y = 0; y < lossyImg.height; y++) {
+    for (int x = 0; x < lossyImg.width; x++) {
       final origP = origImg.getPixel(x, y);
       final lossyP = lossyImg.getPixel(x, y);
 
@@ -140,89 +140,4 @@ Uint8List _reconstructTask(Map<String, Uint8List> data) {
 
   // Encode the final reconstructed image as a high-quality JPEG to keep the file size low
   return img.encodeJpg(reconstructedImg, quality: 95);
-}
-
-// ─────────────────────────────────────────────
-// IMAGE METRICS (MSE & SSIM)
-// ─────────────────────────────────────────────
-
-Future<Map<String, double>> computeImageMetrics(Uint8List bytes1, Uint8List bytes2) async {
-  return compute(_computeMetricsTask, {'b1': bytes1, 'b2': bytes2});
-}
-
-Map<String, double> _computeMetricsTask(Map<String, dynamic> data) {
-  final b1 = data['b1'] as Uint8List;
-  final b2 = data['b2'] as Uint8List;
-  
-  var img1 = img.decodeImage(b1);
-  var img2 = img.decodeImage(b2);
-  
-  if (img1 == null || img2 == null) return {'mse': 0.0, 'ssim': 0.0};
-  
-  if (img1.width != img2.width || img1.height != img2.height) {
-    img2 = img.copyResize(img2, width: img1.width, height: img1.height);
-  }
-
-  double mse = 0.0;
-  int count = 0;
-  for (int y = 0; y < img1.height; y++) {
-    for (int x = 0; x < img1.width; x++) {
-      final p1 = img1.getPixel(x, y);
-      final p2 = img2.getPixel(x, y);
-      final r = p1.r.toInt() - p2.r.toInt();
-      final g = p1.g.toInt() - p2.g.toInt();
-      final b = p1.b.toInt() - p2.b.toInt();
-      mse += (r * r + g * g + b * b) / 3.0;
-      count++;
-    }
-  }
-  mse = count > 0 ? mse / count : 0.0;
-
-  double ssimTotal = 0.0;
-  int windows = 0;
-  const int winSize = 8;
-  final double c1 = (0.01 * 255) * (0.01 * 255);
-  final double c2 = (0.03 * 255) * (0.03 * 255);
-
-  for (int y = 0; y <= img1.height - winSize; y += winSize) {
-    for (int x = 0; x <= img1.width - winSize; x += winSize) {
-      double sum1 = 0, sum2 = 0;
-      for (int wy = 0; wy < winSize; wy++) {
-        for (int wx = 0; wx < winSize; wx++) {
-          final p1 = img1.getPixel(x + wx, y + wy);
-          final p2 = img2.getPixel(x + wx, y + wy);
-          final l1 = 0.299 * p1.r + 0.587 * p1.g + 0.114 * p1.b;
-          final l2 = 0.299 * p2.r + 0.587 * p2.g + 0.114 * p2.b;
-          sum1 += l1;
-          sum2 += l2;
-        }
-      }
-      final mu1 = sum1 / (winSize * winSize);
-      final mu2 = sum2 / (winSize * winSize);
-
-      double var1 = 0, var2 = 0, cov = 0;
-      for (int wy = 0; wy < winSize; wy++) {
-        for (int wx = 0; wx < winSize; wx++) {
-          final p1 = img1.getPixel(x + wx, y + wy);
-          final p2 = img2.getPixel(x + wx, y + wy);
-          final l1 = 0.299 * p1.r + 0.587 * p1.g + 0.114 * p1.b;
-          final l2 = 0.299 * p2.r + 0.587 * p2.g + 0.114 * p2.b;
-          var1 += (l1 - mu1) * (l1 - mu1);
-          var2 += (l2 - mu2) * (l2 - mu2);
-          cov += (l1 - mu1) * (l2 - mu2);
-        }
-      }
-      var1 /= (winSize * winSize);
-      var2 /= (winSize * winSize);
-      cov /= (winSize * winSize);
-
-      final ssim = ((2 * mu1 * mu2 + c1) * (2 * cov + c2)) /
-                   ((mu1 * mu1 + mu2 * mu2 + c1) * (var1 + var2 + c2));
-      ssimTotal += ssim;
-      windows++;
-    }
-  }
-  final ssim = windows > 0 ? ssimTotal / windows : 1.0;
-
-  return {'mse': mse, 'ssim': ssim};
 }

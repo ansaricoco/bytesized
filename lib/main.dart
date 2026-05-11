@@ -1,8 +1,16 @@
 import 'package:flutter/material.dart';
-
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:bytesized/home_screen.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Supabase with dummy values or hardcoded keys if dotenv is unavailable.
+  // Replace these with your actual project credentials or a secure configuration method.
+  await Supabase.initialize(
+    url: 'https://ahethxfibhsgcztlepzw.supabase.co',
+    anonKey: 'sb_publishable_MwBXLpCeSNyBhtdxs2dRwA_YDis7IkM',
+  );
   runApp(const ImageCompressorApp());
 }
 

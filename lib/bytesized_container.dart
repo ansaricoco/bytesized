@@ -40,7 +40,7 @@ class ByteSizedContainer {
       ArchiveFile(metadataName, metadataBytes.length, metadataBytes),
     );
 
-    final zipBytes = ZipEncoder().encode(archive)!;
+    final zipBytes = ZipEncoder().encode(archive);
 
     return Uint8List.fromList(zipBytes);
   }
