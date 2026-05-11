@@ -4,8 +4,6 @@ import 'dart:isolate';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:gal/gal.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -13,6 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import '../app_preset.dart';
 import '../image_utils_stub.dart' if (dart.library.html) '../image_utils_web.dart';
 import 'package:bytesized/file_utils.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:bytesized/image_processing.dart';
 
 // ─────────────────────────────────────────────
@@ -63,7 +62,7 @@ class _ResultScreenState extends State<ResultScreen> {
     super.initState();
 
     // Strictly enforce a limit of 5 files for processing to maintain 
-    // memory stability and comply with Firebase upload quotas.
+    // memory stability and comply with storage upload quotas.
     if (widget.imageBytesList.length > 5) {
       _limitedBytes = widget.imageBytesList.take(5).toList();
       _limitedNames = widget.fileNames.take(5).toList();
@@ -320,41 +319,43 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
       }
 
       // 2. Authenticate anonymously
-      final userCredential = await FirebaseAuth.instance.signInAnonymously();
-      final userId = userCredential.user?.uid;
+      final authResponse = await Supabase.instance.client.auth.signInAnonymously();
+      final userId = authResponse.user?.id;
       if (userId == null) {
         throw Exception('Authentication failed.');
       }
 
-      // 3. Upload to Firebase Storage
+      // 3. Upload to Supabase Storage
       final fileName = 'reconstruction_${DateTime.now().millisecondsSinceEpoch}.bytesized';
-      final storageRef = FirebaseStorage.instance.ref().child('uploads/$userId/$fileName');
+      const bucketName = 'uploads'; // Ensure you have an 'uploads' bucket configured in Supabase Storage
+      final path = '$userId/$fileName';
 
-      // Set metadata and perform the upload once
-      final metadata = SettableMetadata(contentType: 'application/octet-stream');
-      await storageRef.putData(Uint8List.fromList(zipBytes), metadata);
+      await Supabase.instance.client.storage.from(bucketName).uploadBinary(
+            path,
+            Uint8List.fromList(zipBytes),
+            fileOptions: const FileOptions(
+              contentType: 'application/octet-stream',
+              upsert: false,
+            ),
+          );
 
       // 4. Get download URL
-      final downloadUrl = await storageRef.getDownloadURL();
+      final downloadUrl = Supabase.instance.client.storage.from(bucketName).getPublicUrl(path);
 
       // 5. Share the link
       await Share.share(
         'Open this link with the ByteSized app to reconstruct the image:\n\n$downloadUrl',
         subject: 'ByteSized Image Reconstruction Link',
       );
-
-    } on FirebaseAuthException catch (e) {
+    } on AuthException catch (e) {
       String message = 'Authentication failed: ${e.message}';
-      if (e.code == 'admin-restricted-operation' || e.message?.contains('CONFIGURATION_NOT_FOUND') == true) {
-        message = 'Anonymous Sign-in is not enabled in the Firebase Console.';
-      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
       }
-    } on FirebaseException catch (e) {
+    } on StorageException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Firebase Storage Error (${e.code}): ${e.message}')),
+          SnackBar(content: Text('Supabase Storage Error (${e.statusCode}): ${e.message}')),
         );
       }
     } catch (e) {

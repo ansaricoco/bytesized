@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'firebase_options.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:bytesized/home_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
+  await Supabase.initialize(
+    url: 'https://zkkzuknacdpinvmxlhkl.supabase.co',
+    anonKey:
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpra3p1a25hY2RwaW52bXhsaGtsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0OTM1ODIsImV4cCI6MjA5NDA2OTU4Mn0.YxvGNFyT-r6M7YxLRZK_ApUEZdtNOifoMFtXV_n-Wig',
   );
   runApp(const ImageCompressorApp());
 }
