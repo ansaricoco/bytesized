@@ -67,11 +67,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _pickImage(ActionMode mode) async {
     if (mode == ActionMode.compress) {
-      // Natively downsample the image in Android before Dart loads it into RAM.
-      final List<XFile> files = await _picker.pickMultiImage(
-        maxWidth: 1920,
-        maxHeight: 1920,
-      );
+      // By default pickMultiImage returns the unmodified file. Specifying maxWidth
+      // or maxHeight forces the OS to re-encode the image, inflating its size.
+      final List<XFile> files = await _picker.pickMultiImage();
       if (files.isNotEmpty && mounted) {
         List<Uint8List> bytesList = [];
         List<String> names = [];

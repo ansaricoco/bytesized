@@ -120,6 +120,8 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
   Uint8List? _resultBytes;
   Uint8List? _residualBytes;
   String? _errorMsg;
+  String? _inputResolution;
+  String? _resultResolution;
 
   int get _originalSize => widget.imageBytes.length;
   int get _resultSize => _resultBytes?.length ?? 0;
@@ -139,8 +141,18 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
   @override
   void initState() {
     super.initState();
+    _fetchInputResolution();
     // Auto-process on open
     _process();
+  }
+
+  Future<void> _fetchInputResolution() async {
+    try {
+      final img = await decodeImageFromList(widget.imageBytes);
+      if (mounted) {
+        setState(() => _inputResolution = '${img.width} x ${img.height}');
+      }
+    } catch (_) {}
   }
 
   Future<void> _process() async {
@@ -149,6 +161,7 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
       _errorMsg = null;
       _resultBytes = null;
       _residualBytes = null;
+      _resultResolution = null;
     });
 
     try {
@@ -187,8 +200,15 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
         }
       }
 
+      String? resResolution;
+      try {
+        final img = await decodeImageFromList(result);
+        resResolution = '${img.width} x ${img.height}';
+      } catch (_) {}
+
       setState(() {
         _resultBytes = result;
+        _resultResolution = resResolution;
         _processing = false;
       });
     } catch (e) {
@@ -348,6 +368,10 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
             const SizedBox(height: 4),
             _InfoRow(
                 label: 'Size', value: _formatSize(_originalSize)),
+            if (_inputResolution != null) ...[
+              const SizedBox(height: 4),
+              _InfoRow(label: 'Resolution', value: _inputResolution!),
+            ],
 
             const SizedBox(height: 24),
             const Divider(color: Color(0xFF2A2A2A)),
@@ -431,6 +455,10 @@ class _ResultItemViewState extends State<_ResultItemView> with AutomaticKeepAliv
               const SizedBox(height: 4),
               _InfoRow(
                   label: 'Size', value: _formatSize(_resultSize)),
+              if (_resultResolution != null) ...[
+                const SizedBox(height: 4),
+                _InfoRow(label: 'Resolution', value: _resultResolution!),
+              ],
               const SizedBox(height: 4),
               _InfoRow(
                 label: 'Size Reduction',
