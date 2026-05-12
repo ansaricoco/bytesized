@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 
 import 'package:bytesized/app_preset.dart';
 import 'package:bytesized/file_utils.dart';
+import 'package:bytesized/sharing_handler.dart';
 import 'result_screen.dart';
 
 // ─────────────────────────────────────────────
@@ -25,6 +26,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _loadingHistory = true;
   AppPreset? _selectedPreset;
   late final List<AppPreset> _presets;
+  final SharingHandler _sharingHandler = SharingHandler();
 
   @override
   void initState() {
@@ -32,6 +34,17 @@ class _HomeScreenState extends State<HomeScreen> {
     _presets = AppPreset.getPresets();
     _selectedPreset = _presets.first;
     _loadRecentFiles();
+
+    _sharingHandler.listenForDeepLinks((bytesList, names) {
+      if (mounted) {
+        _navigateToResult(bytesList, names, ActionMode.decompress);
+      }
+    });
+    _sharingHandler.checkInitialLink((bytesList, names) {
+      if (mounted) {
+        _navigateToResult(bytesList, names, ActionMode.decompress);
+      }
+    });
   }
 
   Future<void> _loadRecentFiles() async {
@@ -121,6 +134,14 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadRecentFiles(); // Reload when returning from ResultScreen
   }
 
+  Future<void> _shareImage() async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const ShareDialog(),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -138,7 +159,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'Image Compressor',
+                          'ByteSized',
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 26,
@@ -148,7 +169,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Compress and decompress images with adjustable quality',
+                          'Compress and decompress images!',
                           style: TextStyle(
                             color: Colors.white.withOpacity(0.45),
                             fontSize: 13,
@@ -211,6 +232,20 @@ class _HomeScreenState extends State<HomeScreen> {
                       icon: Icons.open_in_full_rounded,
                       iconColor: const Color(0xFF22C55E),
                       onTap: () => _pickImage(ActionMode.decompress),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: _ActionCard(
+                      label: 'Share Link',
+                      subtitle: 'Upload and generate URL',
+                      icon: Icons.cloud_upload_rounded,
+                      iconColor: const Color(0xFFA855F7),
+                      onTap: _shareImage,
                     ),
                   ),
                 ],
@@ -285,6 +320,221 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// REAL-TIME SHARE DIALOG POPUP
+// ─────────────────────────────────────────────
+class ShareDialog extends StatefulWidget {
+  const ShareDialog({super.key});
+
+  @override
+  State<ShareDialog> createState() => _ShareDialogState();
+}
+
+class _ShareDialogState extends State<ShareDialog> {
+  final SharingHandler _sharingHandler = SharingHandler();
+  final ImagePicker _picker = ImagePicker();
+
+  String _step = 'selection';
+  String _progressText = '';
+  String _generatedLink = '';
+
+  Future<void> _pickAndShare(bool asZip) async {
+    List<XFile> selectedFiles = [];
+
+    try {
+      if (asZip) {
+        final result = await FilePicker.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: ['zip'],
+          allowMultiple: true,
+        );
+        if (result != null) {
+          selectedFiles = result.files.take(5).where((f) => f.path != null).map((f) => XFile(f.path!)).toList();
+        }
+      } else {
+        final List<XFile> files = await _picker.pickMultiImage();
+        selectedFiles = files.take(5).toList();
+      }
+
+      if (selectedFiles.isEmpty) return;
+
+      setState(() {
+        _step = 'processing';
+        _progressText = 'Initializing request...';
+      });
+
+      final link = await _sharingHandler.shareImages(
+        files: selectedFiles,
+        isZipFiles: asZip,
+        onProgress: (status) {
+          if (mounted) {
+            setState(() => _progressText = status);
+          }
+        },
+      );
+
+      if (mounted) {
+        if (link != null) {
+          setState(() {
+            _step = 'success';
+            _generatedLink = link;
+          });
+        } else {
+          setState(() {
+            _step = 'error';
+            _progressText = 'Failed to generate a secure link.';
+          });
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _step = 'error';
+          _progressText = 'Error encountered: $e';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Widget content;
+
+    if (_step == 'selection') {
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Share Files', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+              IconButton(
+                icon: const Icon(Icons.close_rounded, color: Colors.white54),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.photo_library_rounded, color: Color(0xFF3B82F6)),
+            title: const Text('Share as WebP', style: TextStyle(color: Colors.white)),
+            subtitle: const Text('Lossy compression only (up to 5 images)', style: TextStyle(color: Colors.white54)),
+            onTap: () => _pickAndShare(false),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.folder_zip_rounded, color: Color(0xFFA855F7)),
+            title: const Text('Share as ZIP', style: TextStyle(color: Colors.white)),
+            subtitle: const Text('Upload up to 5 .zip files', style: TextStyle(color: Colors.white54)),
+            onTap: () => _pickAndShare(true),
+          ),
+        ],
+      );
+    } else if (_step == 'processing') {
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 16),
+          const CircularProgressIndicator(color: Color(0xFF3B82F6)),
+          const SizedBox(height: 24),
+          Text(_progressText, style: const TextStyle(color: Colors.white, fontSize: 16), textAlign: TextAlign.center),
+          const SizedBox(height: 16),
+        ],
+      );
+    } else if (_step == 'success') {
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.check_circle_outline_rounded, color: Color(0xFF22C55E), size: 48),
+          const SizedBox(height: 16),
+          const Text('Link Generated!', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF222222),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.white.withOpacity(0.1)),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _generatedLink,
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  icon: const Icon(Icons.copy_rounded, color: Color(0xFF3B82F6)),
+                  onPressed: () {
+                    _sharingHandler.copyToClipboard(_generatedLink);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Link copied to clipboard!')),
+                    );
+                  },
+                )
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF3B82F6),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              child: const Text('Done', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+            ),
+          )
+        ],
+      );
+    } else {
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 48),
+          const SizedBox(height: 16),
+          const Text('Error', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+          const SizedBox(height: 16),
+          Text(_progressText, style: const TextStyle(color: Colors.white70), textAlign: TextAlign.center),
+          const SizedBox(height: 24),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF222222),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              child: const Text('Close', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+            ),
+          )
+        ],
+      );
+    }
+
+    return Dialog(
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 300),
+          child: content,
         ),
       ),
     );

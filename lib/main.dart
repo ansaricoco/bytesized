@@ -5,11 +5,9 @@ import 'package:bytesized/home_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize Supabase with dummy values or hardcoded keys if dotenv is unavailable.
-  // Replace these with your actual project credentials or a secure configuration method.
   await Supabase.initialize(
-    url: 'https://ahethxfibhsgcztlepzw.supabase.co',
-    anonKey: 'sb_publishable_MwBXLpCeSNyBhtdxs2dRwA_YDis7IkM',
+    url: 'https://zkkzuknacdpinvmxlhkl.supabase.co',
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpra3p1a25hY2RwaW52bXhsaGtsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0OTM1ODIsImV4cCI6MjA5NDA2OTU4Mn0.YxvGNFyT-r6M7YxLRZK_ApUEZdtNOifoMFtXV_n-Wig',
   );
   runApp(const ImageCompressorApp());
 }
@@ -20,7 +18,7 @@ class ImageCompressorApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Image Compressor',
+      title: 'ByteSized',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

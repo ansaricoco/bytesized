@@ -30,7 +30,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // Verify that the title is present.
-    expect(find.text('Image Compressor'), findsOneWidget);
+    expect(find.text('ByteSized'), findsOneWidget);
 
     // Verify that the main action buttons are present.
     expect(find.text('Compress'), findsOneWidget);

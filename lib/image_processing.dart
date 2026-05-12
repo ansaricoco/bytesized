@@ -52,7 +52,7 @@ final int quality = data['quality'];
 final decoded = img.decodeImage(inputBytes);
 if (decoded == null) throw Exception('Could not decode image');
 
-// Encode as JPG so the quality parameter is respected and the file shrinks!
+// Encode as JPG so the quality parameter is respected and the file shrinks
 return img.encodeJpg(decoded, quality: quality);
 }
 

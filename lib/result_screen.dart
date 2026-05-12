@@ -1,12 +1,10 @@
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../app_preset.dart';
 import '../image_utils_stub.dart' if (dart.library.html) '../image_utils_web.dart';
@@ -182,95 +180,97 @@ class _ResultScreenState extends State<ResultScreen> {
   Future<void> _save(int index) async {
     final result = _resultBytesList[index];
     if (result == null) return;
-    final isCompress = widget.mode == ActionMode.compress;
-    final fileName = widget.fileNames[index];
-    final ext = isCompress 
-        ? '.webp' 
-        : (fileName.toLowerCase().endsWith('.zip') || fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${fileName.split('.').last}');
-    final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
-    
-    if (kIsWeb) {
-      downloadBytes(result, outName);
-    } else {
-      try {
-        final saveDir = await getAppSaveDirectory();
-        final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
-        final file = File('$dirPath/$outName');
-        await file.writeAsBytes(result);
-        
-        try {
-          await Gal.putImage(file.path);
-        } catch (_) {}
-        
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Image saved successfully!')),
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error saving image: $e')),
-          );
-        }
-      }
-    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => SaveDialog(
+        title: 'Saved!',
+        processingText: 'Saving image...',
+        saveTask: () async {
+          final isCompress = widget.mode == ActionMode.compress;
+          final fileName = widget.fileNames[index];
+          final ext = isCompress 
+              ? '.webp' 
+              : (fileName.toLowerCase().endsWith('.zip') || fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${fileName.split('.').last}');
+          final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
+          
+          if (kIsWeb) {
+            downloadBytes(result, outName);
+            return 'Image download started.';
+          } else {
+            final saveDir = await getAppSaveDirectory();
+            final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+            final file = File('$dirPath/$outName');
+            await file.writeAsBytes(result);
+            
+            try {
+              await Gal.putImage(file.path);
+            } catch (_) {}
+            
+            return 'Image saved successfully!';
+          }
+        },
+      ),
+    );
   }
 
   Future<void> _saveZip(int index) async {
-    final resultBytes = _resultBytesList[index];
-    final residualBytes = _residualBytesList[index];
-    if (resultBytes == null || residualBytes == null) return;
-    
-    final zipBytesNullable = await compute(_encodeZipTask, {
-      'result': resultBytes,
-      'residual': residualBytes,
-      'original': widget.imageBytesList[index],
-    });
-    if (zipBytesNullable == null) return;
-    final zipBytes = zipBytesNullable;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => SaveDialog(
+        title: 'Saved!',
+        processingText: 'Saving ZIP archive...',
+        saveTask: () async {
+          if (widget.mode == ActionMode.decompress && widget.fileNames[index].toLowerCase().endsWith('.zip')) {
+            final zipBytes = widget.imageBytesList[index];
+            final outName = 'downloaded_archive_${DateTime.now().millisecondsSinceEpoch}.zip';
 
-    final outName = 'compressed_with_residual_${DateTime.now().millisecondsSinceEpoch}.zip';
+            if (kIsWeb) {
+              downloadBytes(zipBytes, outName);
+              return 'ZIP download started.';
+            } else {
+              final saveDir = await getAppSaveDirectory();
+              final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+              final file = File('$dirPath/$outName');
+              await file.writeAsBytes(zipBytes);
+              return 'ZIP saved to Downloads folder!';
+            }
+          }
 
-    if (kIsWeb) {
-      downloadBytes(Uint8List.fromList(zipBytes), outName);
-    } else {
-      try {
-        final saveDir = await getAppSaveDirectory();
-        final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
-        final file = File('$dirPath/$outName');
-        await file.writeAsBytes(zipBytes);
-        
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('ZIP saved to Downloads folder')),
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error saving ZIP: $e')));
-        }
-      }
-    }
-  }
+          final resultBytes = _resultBytesList[index];
+          final residualBytes = _residualBytesList[index];
+          if (resultBytes == null || residualBytes == null) {
+            throw Exception('Processing not finished yet.');
+          }
+          
+          final zipBytesNullable = await compute(_encodeZipTask, {
+            'result': resultBytes,
+            'residual': residualBytes,
+            'original': widget.imageBytesList[index],
+          });
+          
+          if (zipBytesNullable == null) {
+            throw Exception('Failed to encode ZIP archive.');
+          }
+          final zipBytes = zipBytesNullable;
 
-  Future<void> _share(int index) async {
-    final result = _resultBytesList[index];
-    if (result == null) return;
-    final isCompress = widget.mode == ActionMode.compress;
-    final fileName = widget.fileNames[index];
-    final ext = isCompress 
-        ? '.webp' 
-        : (fileName.toLowerCase().endsWith('.zip') || fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${fileName.split('.').last}');
-    final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
-    final mimeType = ext == '.png' 
-        ? 'image/png' 
-        : (ext == '.webp' 
-            ? 'image/webp' 
-            : (ext == '.jpg' || ext == '.jpeg' ? 'image/jpeg' : 'image/${ext.substring(1)}'));
-    
-    final xFile = XFile.fromData(result, name: outName, mimeType: mimeType);
-    await Share.shareXFiles([xFile], text: 'Check out this image processed with ByteSized!');
+          final outName = 'compressed_with_residual_${DateTime.now().millisecondsSinceEpoch}.zip';
+
+          if (kIsWeb) {
+            downloadBytes(Uint8List.fromList(zipBytes), outName);
+            return 'ZIP download started.';
+          } else {
+            final saveDir = await getAppSaveDirectory();
+            final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+            final file = File('$dirPath/$outName');
+            await file.writeAsBytes(zipBytes);
+            return 'ZIP saved to Downloads folder!';
+          }
+        },
+      ),
+    );
   }
 
   Future<void> _saveAll() async {
@@ -279,64 +279,42 @@ class _ResultScreenState extends State<ResultScreen> {
       return;
     }
     
-    int savedCount = 0;
-    for (int i = 0; i < widget.imageBytesList.length; i++) {
-      final result = _resultBytesList[i];
-      if (result == null) continue;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => SaveDialog(
+        title: 'Saved All!',
+        processingText: 'Saving all images...',
+        saveTask: () async {
+          int savedCount = 0;
+          for (int i = 0; i < widget.imageBytesList.length; i++) {
+            final result = _resultBytesList[i];
+            if (result == null) continue;
 
-      final isCompress = widget.mode == ActionMode.compress;
-      final fileName = widget.fileNames[i];
-      final ext = isCompress 
-          ? '.webp' 
-          : (fileName.toLowerCase().endsWith('.zip') || fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${fileName.split('.').last}');
-      final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}_$i$ext';
-      
-      if (kIsWeb) {
-        downloadBytes(result, outName);
-      } else {
-        try {
-          final saveDir = await getAppSaveDirectory();
-          final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
-          final file = File('$dirPath/$outName');
-          await file.writeAsBytes(result);
-          try { await Gal.putImage(file.path); } catch (_) {}
-        } catch (e) {
-          debugPrint('Error saving $outName: $e');
-        }
-      }
-      savedCount++;
-    }
-    
-    if (mounted && !kIsWeb && savedCount > 0) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved $savedCount images successfully!')));
-    }
-  }
-
-  Future<void> _shareAll() async {
-    if (_processingList.any((p) => p)) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please wait for all images to finish processing.')));
-      return;
-    }
-    
-    List<XFile> filesToShare = [];
-    for (int i = 0; i < widget.imageBytesList.length; i++) {
-      final result = _resultBytesList[i];
-      if (result == null) continue;
-
-      final isCompress = widget.mode == ActionMode.compress;
-      final fileName = widget.fileNames[i];
-      final ext = isCompress 
-          ? '.webp' 
-          : (fileName.toLowerCase().endsWith('.zip') || fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${fileName.split('.').last}');
-      final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}_$i$ext';
-      final mimeType = ext == '.png' ? 'image/png' : (ext == '.webp' ? 'image/webp' : (ext == '.jpg' || ext == '.jpeg' ? 'image/jpeg' : 'image/${ext.substring(1)}'));
-      
-      filesToShare.add(XFile.fromData(result, name: outName, mimeType: mimeType));
-    }
-    
-    if (filesToShare.isNotEmpty) {
-      await Share.shareXFiles(filesToShare, text: 'Check out these images processed with ByteSized!');
-    }
+            final isCompress = widget.mode == ActionMode.compress;
+            final fileName = widget.fileNames[i];
+            final ext = isCompress 
+                ? '.webp' 
+                : (fileName.toLowerCase().endsWith('.zip') || fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${fileName.split('.').last}');
+            final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}_$i$ext';
+            
+            if (kIsWeb) {
+              downloadBytes(result, outName);
+            } else {
+              final saveDir = await getAppSaveDirectory();
+              final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+              final file = File('$dirPath/$outName');
+              await file.writeAsBytes(result);
+              try { await Gal.putImage(file.path); } catch (_) {}
+            }
+            savedCount++;
+          }
+          
+          if (savedCount == 0) throw Exception('No images to save.');
+          return kIsWeb ? 'Started downloading $savedCount images!' : 'Saved $savedCount images successfully!';
+        },
+      ),
+    );
   }
 
   @override
@@ -363,12 +341,6 @@ class _ResultScreenState extends State<ResultScreen> {
               tooltip: 'Save All',
               onPressed: _saveAll,
             ),
-          if (hasMultiple)
-            IconButton(
-              icon: const Icon(Icons.share_rounded),
-              tooltip: 'Share All',
-              onPressed: _shareAll,
-            ),
         ],
       ),
       body: PageView.builder(
@@ -392,9 +364,137 @@ class _ResultScreenState extends State<ResultScreen> {
             ssim: _ssimList[index],
             onSave: () => _save(index),
             onSaveZip: () => _saveZip(index),
-            onShare: () => _share(index),
           );
         },
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// REAL-TIME SAVE DIALOG POPUP 
+// (Edit this to change the UI of the download pop-ups)
+// ─────────────────────────────────────────────
+class SaveDialog extends StatefulWidget {
+  final Future<String> Function() saveTask;
+  final String title;
+  final String processingText;
+
+  const SaveDialog({
+    super.key,
+    required this.saveTask,
+    required this.title,
+    required this.processingText,
+  });
+
+  @override
+  State<SaveDialog> createState() => _SaveDialogState();
+}
+
+class _SaveDialogState extends State<SaveDialog> {
+  String _step = 'processing';
+  String _message = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _message = widget.processingText;
+    _runTask();
+  }
+
+  Future<void> _runTask() async {
+    try {
+      final resultMessage = await widget.saveTask();
+      if (mounted) {
+        setState(() {
+          _step = 'success';
+          _message = resultMessage;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _step = 'error';
+          _message = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Widget content;
+
+    if (_step == 'processing') {
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 16),
+          const CircularProgressIndicator(color: Color(0xFF3B82F6)),
+          const SizedBox(height: 24),
+          Text(_message, style: const TextStyle(color: Colors.white, fontSize: 16), textAlign: TextAlign.center),
+          const SizedBox(height: 16),
+        ],
+      );
+    } else if (_step == 'success') {
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.check_circle_outline_rounded, color: Color(0xFF22C55E), size: 48),
+          const SizedBox(height: 16),
+          Text(widget.title, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+          const SizedBox(height: 16),
+          Text(_message, style: const TextStyle(color: Colors.white70, fontSize: 14), textAlign: TextAlign.center),
+          const SizedBox(height: 24),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF3B82F6),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              child: const Text('Done', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+            ),
+          )
+        ],
+      );
+    } else {
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 48),
+          const SizedBox(height: 16),
+          const Text('Error', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+          const SizedBox(height: 16),
+          Text(_message, style: const TextStyle(color: Colors.white70), textAlign: TextAlign.center),
+          const SizedBox(height: 24),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF222222),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              child: const Text('Close', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+            ),
+          )
+        ],
+      );
+    }
+
+    return Dialog(
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 300),
+          child: content,
+        ),
       ),
     );
   }
@@ -417,7 +517,6 @@ class _ResultItemView extends StatelessWidget {
 
   final VoidCallback onSave;
   final VoidCallback onSaveZip;
-  final VoidCallback onShare;
 
   const _ResultItemView({
     super.key,
@@ -435,7 +534,6 @@ class _ResultItemView extends StatelessWidget {
     required this.ssim,
     required this.onSave,
     required this.onSaveZip,
-    required this.onShare,
   });
 
   int get _originalSize => imageBytes.length;
@@ -634,13 +732,13 @@ class _ResultItemView extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  if (isCompress && residualBytes != null) ...[
+                  if ((isCompress && residualBytes != null) || (!isCompress && fileName.toLowerCase().endsWith('.zip'))) ...[
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(
                         onPressed: onSaveZip,
                         icon: const Icon(Icons.archive_rounded, size: 18),
-                        label: const Text('Download ZIP (WebP + Residual)'),
+                        label: Text(isCompress ? 'Download ZIP (WebP + Residual)' : 'Download Original ZIP'),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color.fromARGB(255, 53, 53, 53),
                           foregroundColor: Colors.white,
@@ -655,25 +753,6 @@ class _ResultItemView extends StatelessWidget {
                     ),
                     const SizedBox(height: 12),
                   ],
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: onShare,
-                      icon: const Icon(Icons.share_rounded, size: 18),
-                      label: const Text('Share Image'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color.fromARGB(255, 53, 53, 53),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8)),
-                        elevation: 0,
-                        textStyle: const TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
