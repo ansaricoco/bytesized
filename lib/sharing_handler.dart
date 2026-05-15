@@ -23,8 +23,10 @@ class SharingHandler {
 
       // 1. Authenticate anonymously
       onProgress?.call('Authenticating to server...');
-      await _supabase.auth.signInAnonymously();
-      
+      if (_supabase.auth.currentSession == null) {
+        await _supabase.auth.signInAnonymously();
+      }
+
       final masterArchive = Archive();
 
       // 2. Process each file into the master payload
@@ -40,7 +42,8 @@ class SharingHandler {
           masterArchive.addFile(ArchiveFile(name, bytes.length, bytes));
         } else {
           final lossyBytes = await encodeToWebP(bytes);
-          masterArchive.addFile(ArchiveFile('image_$i.webp', lossyBytes.length, lossyBytes));
+          masterArchive.addFile(ArchiveFile('original_${files[i].name}', bytes.length, bytes));
+          masterArchive.addFile(ArchiveFile('reconstructed_$i.webp', lossyBytes.length, lossyBytes));
         }
       }
 
@@ -77,25 +80,32 @@ class SharingHandler {
   }
 
   /// Listens for incoming deep links
-  void listenForDeepLinks(Function(List<Uint8List> bytesList, List<String> names) onDataReceived) {
+  void listenForDeepLinks(
+      Function(List<Uint8List> bytesList, List<String> names) onDataReceived,
+      {Function(String)? onStatus}) {
     _appLinks.uriLinkStream.listen((uri) {
-      _handleIncomingUri(uri, onDataReceived);
+      _handleIncomingUri(uri, onDataReceived, onStatus: onStatus);
     });
   }
 
   /// Checks if the app was started by a deep link
-  Future<void> checkInitialLink(Function(List<Uint8List> bytesList, List<String> names) onDataReceived) async {
+  Future<void> checkInitialLink(
+      Function(List<Uint8List> bytesList, List<String> names) onDataReceived,
+      {Function(String)? onStatus}) async {
     try {
       final uri = await _appLinks.getInitialLink();
       if (uri != null) {
-        _handleIncomingUri(uri, onDataReceived);
+        _handleIncomingUri(uri, onDataReceived, onStatus: onStatus);
       }
     } catch (e) {
       debugPrint('Error checking initial link: $e');
+      onStatus?.call('Error checking initial link');
     }
   }
 
-  Future<void> _handleIncomingUri(Uri uri, Function(List<Uint8List> bytesList, List<String> names) onDataReceived) async {
+  Future<void> _handleIncomingUri(
+      Uri uri, Function(List<Uint8List> bytesList, List<String> names) onDataReceived,
+      {Function(String)? onStatus}) async {
     final isCustomScheme = uri.scheme == 'bytesized' && uri.host == 'reconstruct';
     final isAppLink = uri.scheme == 'https' && uri.host == 'bytesized.app' && uri.path.startsWith('/share');
 
@@ -105,8 +115,13 @@ class SharingHandler {
     
     if (path != null) {
       try {
-        await _supabase.auth.signInAnonymously();
+        onStatus?.call('Downloading files...');
+        if (_supabase.auth.currentSession == null) {
+          await _supabase.auth.signInAnonymously();
+        }
         final masterBytes = await _supabase.storage.from('uploads').download(path);
+        
+        onStatus?.call('Extracting files...');
         final archive = ZipDecoder().decodeBytes(masterBytes);
 
         List<Uint8List> bytesList = [];
@@ -124,6 +139,7 @@ class SharingHandler {
         }
       } catch (e) {
         debugPrint('Failed to process incoming link: $e');
+        onStatus?.call('Failed to open link');
       }
     }
   }
