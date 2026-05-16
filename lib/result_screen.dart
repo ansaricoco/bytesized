@@ -190,10 +190,13 @@ class _ResultScreenState extends State<ResultScreen> {
         saveTask: () async {
           final isCompress = widget.mode == ActionMode.compress;
           final fileName = widget.fileNames[index];
+          final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
+
           final ext = isCompress 
               ? '.webp' 
-              : (fileName.toLowerCase().endsWith('.zip') || fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${fileName.split('.').last}');
-          final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}$ext';
+              : (isZipDecompress ? '.jpg' : '.${fileName.split('.').last}');
+          final prefix = isCompress ? 'compressed' : (isZipDecompress ? 'reconstructed' : 'downloaded');
+          final outName = '${prefix}_${DateTime.now().millisecondsSinceEpoch}$ext';
           
           if (kIsWeb) {
             downloadBytes(result, outName);
@@ -293,10 +296,13 @@ class _ResultScreenState extends State<ResultScreen> {
 
             final isCompress = widget.mode == ActionMode.compress;
             final fileName = widget.fileNames[i];
+            final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
+
             final ext = isCompress 
                 ? '.webp' 
-                : (fileName.toLowerCase().endsWith('.zip') || fileName.toLowerCase().endsWith('.bytesized') ? '.jpg' : '.${fileName.split('.').last}');
-            final outName = '${isCompress ? 'compressed' : 'reconstructed'}_${DateTime.now().millisecondsSinceEpoch}_$i$ext';
+                : (isZipDecompress ? '.jpg' : '.${fileName.split('.').last}');
+            final prefix = isCompress ? 'compressed' : (isZipDecompress ? 'reconstructed' : 'downloaded');
+            final outName = '${prefix}_${DateTime.now().millisecondsSinceEpoch}_$i$ext';
             
             if (kIsWeb) {
               downloadBytes(result, outName);
@@ -321,6 +327,8 @@ class _ResultScreenState extends State<ResultScreen> {
   Widget build(BuildContext context) {
     final isCompress = widget.mode == ActionMode.compress;
     final hasMultiple = widget.imageBytesList.length > 1;
+    final currentFileName = widget.fileNames.isNotEmpty ? widget.fileNames[_currentIndex] : '';
+    final isZipDecompress = !isCompress && currentFileName.toLowerCase().endsWith('.zip');
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
@@ -329,8 +337,8 @@ class _ResultScreenState extends State<ResultScreen> {
         foregroundColor: Colors.white,
         title: Text(
           hasMultiple 
-              ? '${isCompress ? 'Compress' : 'Decompress'} (${_currentIndex + 1}/${widget.imageBytesList.length})'
-              : (isCompress ? 'Compress to WebP' : 'Reconstructed (Lossy + Residual)'),
+              ? '${isCompress ? 'Compress' : (isZipDecompress ? 'Decompress' : 'View')} (${_currentIndex + 1}/${widget.imageBytesList.length})'
+              : (isCompress ? 'Compress to WebP' : (isZipDecompress ? 'Reconstructed (Lossy + Residual)' : 'Downloaded Image')),
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
         elevation: 0,
@@ -554,68 +562,72 @@ class _ResultItemView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isCompress = mode == ActionMode.compress;
+    final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
+    final isJustViewing = !isCompress && !isZipDecompress;
 
     return SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Input File
-            const Text('Input File',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600)),
-            const SizedBox(height: 8),
-            if (fileName.toLowerCase().endsWith('.zip'))
-              Container(
-                width: double.infinity,
-                height: 200,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1A1A1A),
+            if (!isJustViewing) ...[
+              // Input File
+              const Text('Input File',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              if (fileName.toLowerCase().endsWith('.zip'))
+                Container(
+                  width: double.infinity,
+                  height: 200,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A1A1A),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.folder_zip_rounded, size: 64, color: Color(0xFF818CF8)),
+                      SizedBox(height: 12),
+                      Text('ZIP Archive metadata', style: TextStyle(color: Colors.white70)),
+                    ],
+                  ),
+                )
+              else
+                ClipRRect(
                   borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.folder_zip_rounded, size: 64, color: Color(0xFF818CF8)),
-                    SizedBox(height: 12),
-                    Text('ZIP Archive metadata', style: TextStyle(color: Colors.white70)),
-                  ],
-                ),
-              )
-            else
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 400),
-                  child: Image.memory(
-                    imageBytes,
-                    width: double.infinity,
-                    fit: BoxFit.contain,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 400),
+                    child: Image.memory(
+                      imageBytes,
+                      width: double.infinity,
+                      fit: BoxFit.contain,
+                    ),
                   ),
                 ),
-              ),
-            const SizedBox(height: 8),
-            _InfoRow(
-                label: 'Format',
-                value: fileName.split('.').last.toUpperCase()),
-            const SizedBox(height: 4),
-            _InfoRow(
-                label: 'Size', value: _formatSize(_originalSize)),
-            if (inputResolution != null) ...[
+              const SizedBox(height: 8),
+              _InfoRow(
+                  label: 'Format',
+                  value: fileName.split('.').last.toUpperCase()),
               const SizedBox(height: 4),
-              _InfoRow(label: 'Resolution', value: inputResolution!),
-            ],
+              _InfoRow(
+                  label: 'Size', value: _formatSize(_originalSize)),
+              if (inputResolution != null) ...[
+                const SizedBox(height: 4),
+                _InfoRow(label: 'Resolution', value: inputResolution!),
+              ],
 
-            const SizedBox(height: 24),
-            const Divider(color: Color(0xFF2A2A2A)),
-            const SizedBox(height: 24),
+              const SizedBox(height: 24),
+              const Divider(color: Color(0xFF2A2A2A)),
+              const SizedBox(height: 24),
+            ],
 
             // Result
             Row(
               children: [
-                Text(isCompress ? 'WebP Output' : 'Reconstructed Output',
+                Text(isCompress ? 'WebP Output' : (isZipDecompress ? 'Reconstructed Output' : 'Downloaded Image'),
                     style: const TextStyle(
                         color: Colors.white,
                         fontSize: 14,
@@ -630,7 +642,7 @@ class _ResultItemView extends StatelessWidget {
                     border: Border.all(
                         color: const Color(0xFF3B82F6).withOpacity(0.4)),
                   ),
-                  child: Text(isCompress ? 'WEBP' : 'JPG',
+                  child: Text(isCompress ? 'WEBP' : (isZipDecompress ? 'JPG' : fileName.split('.').last.toUpperCase()),
                       style: const TextStyle(
                           color: Color(0xFF3B82F6),
                           fontSize: 11,
@@ -654,7 +666,7 @@ class _ResultItemView extends StatelessWidget {
                       const CircularProgressIndicator(
                           color: Color(0xFF3B82F6), strokeWidth: 2),
                       const SizedBox(height: 12),
-                      Text(isCompress ? 'Converting to WebP...' : 'Reconstructing image...',
+                      Text(isCompress ? 'Converting to WebP...' : 'Processing image...',
                           style: const TextStyle(
                               color: Colors.white54, fontSize: 13)),
                     ],
@@ -686,7 +698,7 @@ class _ResultItemView extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 8),
-              _InfoRow(label: 'Format', value: isCompress ? 'WEBP' : 'JPG'),
+              _InfoRow(label: 'Format', value: isCompress ? 'WEBP' : (isZipDecompress ? 'JPG' : fileName.split('.').last.toUpperCase())),
               const SizedBox(height: 4),
               _InfoRow(
                   label: 'Size', value: _formatSize(_resultSize)),
@@ -699,19 +711,21 @@ class _ResultItemView extends StatelessWidget {
                 _InfoRow(label: 'MSE (vs Original)', value: mse!.toStringAsFixed(2)),
                 const SizedBox(height: 4),
                 _InfoRow(label: 'SSIM (vs Original)', value: ssim!.toStringAsFixed(4)),
-              ] else if (!isCompress) ...[
+              ] else if (isZipDecompress) ...[
                 const SizedBox(height: 4),
                 const _InfoRow(label: 'Metrics', value: 'Original missing in ZIP', valueColor: Colors.white54),
               ],
-              const SizedBox(height: 4),
-              _InfoRow(
-                label: 'Size Reduction',
-                value:
-                    '${_savingsPercent > 0 ? '-' : '+'}${_savingsPercent.abs().toStringAsFixed(1)}%',
-                valueColor: _savingsPercent > 0
-                    ? const Color(0xFF22C55E)
-                    : Colors.orangeAccent,
-              ),
+              if (isCompress || isZipDecompress) ...[
+                const SizedBox(height: 4),
+                _InfoRow(
+                  label: 'Size Reduction',
+                  value:
+                      '${_savingsPercent > 0 ? '-' : '+'}${_savingsPercent.abs().toStringAsFixed(1)}%',
+                  valueColor: _savingsPercent > 0
+                      ? const Color(0xFF22C55E)
+                      : Colors.orangeAccent,
+                ),
+              ],
               const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
@@ -732,7 +746,7 @@ class _ResultItemView extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  if ((isCompress && residualBytes != null) || (!isCompress && fileName.toLowerCase().endsWith('.zip'))) ...[
+                  if ((isCompress && residualBytes != null) || isZipDecompress) ...[
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(

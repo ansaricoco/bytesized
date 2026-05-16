@@ -35,14 +35,16 @@ class _HomeScreenState extends State<HomeScreen> {
     _selectedPreset = _presets.first;
     _loadRecentFiles();
 
-    _sharingHandler.listenForDeepLinks((bytesList, names) {
+    _sharingHandler.listenForDeepLinks((bytesList, names, type) {
       if (mounted) {
-        _navigateToResult(bytesList, names, ActionMode.decompress);
+        final mode = type == 'webp' ? ActionMode.compress : ActionMode.decompress;
+        _navigateToResult(bytesList, names, mode);
       }
     });
-    _sharingHandler.checkInitialLink((bytesList, names) {
+    _sharingHandler.checkInitialLink((bytesList, names, type) {
       if (mounted) {
-        _navigateToResult(bytesList, names, ActionMode.decompress);
+        final mode = type == 'webp' ? ActionMode.compress : ActionMode.decompress;
+        _navigateToResult(bytesList, names, mode);
       }
     });
   }

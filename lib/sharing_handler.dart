@@ -41,9 +41,8 @@ class SharingHandler {
           }
           masterArchive.addFile(ArchiveFile(name, bytes.length, bytes));
         } else {
-          final lossyBytes = await encodeToWebP(bytes);
-          masterArchive.addFile(ArchiveFile('original_${files[i].name}', bytes.length, bytes));
-          masterArchive.addFile(ArchiveFile('reconstructed_$i.webp', lossyBytes.length, lossyBytes));
+          onProgress?.call('Packaging file ${i + 1} for WebP compression...');
+          masterArchive.addFile(ArchiveFile(files[i].name, bytes.length, bytes));
         }
       }
 
@@ -81,7 +80,7 @@ class SharingHandler {
 
   /// Listens for incoming deep links
   void listenForDeepLinks(
-      Function(List<Uint8List> bytesList, List<String> names) onDataReceived,
+      Function(List<Uint8List> bytesList, List<String> names, String type) onDataReceived,
       {Function(String)? onStatus}) {
     _appLinks.uriLinkStream.listen((uri) {
       _handleIncomingUri(uri, onDataReceived, onStatus: onStatus);
@@ -90,7 +89,7 @@ class SharingHandler {
 
   /// Checks if the app was started by a deep link
   Future<void> checkInitialLink(
-      Function(List<Uint8List> bytesList, List<String> names) onDataReceived,
+      Function(List<Uint8List> bytesList, List<String> names, String type) onDataReceived,
       {Function(String)? onStatus}) async {
     try {
       final uri = await _appLinks.getInitialLink();
@@ -104,7 +103,7 @@ class SharingHandler {
   }
 
   Future<void> _handleIncomingUri(
-      Uri uri, Function(List<Uint8List> bytesList, List<String> names) onDataReceived,
+      Uri uri, Function(List<Uint8List> bytesList, List<String> names, String type) onDataReceived,
       {Function(String)? onStatus}) async {
     final isCustomScheme = uri.scheme == 'bytesized' && uri.host == 'reconstruct';
     final isAppLink = uri.scheme == 'https' && uri.host == 'bytesized.app' && uri.path.startsWith('/share');
@@ -112,6 +111,7 @@ class SharingHandler {
     if (!(isCustomScheme || isAppLink)) return;
 
     final path = uri.queryParameters['path'];
+    final type = uri.queryParameters['type'] ?? 'zip';
     
     if (path != null) {
       try {
@@ -135,7 +135,7 @@ class SharingHandler {
         }
 
         if (bytesList.isNotEmpty) {
-          onDataReceived(bytesList, names);
+          onDataReceived(bytesList, names, type);
         }
       } catch (e) {
         debugPrint('Failed to process incoming link: $e');
