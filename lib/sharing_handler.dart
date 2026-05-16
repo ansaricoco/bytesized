@@ -1,11 +1,9 @@
-import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:app_links/app_links.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'image_processing.dart';
 
 class SharingHandler {
   final _supabase = Supabase.instance.client;
@@ -27,9 +25,8 @@ class SharingHandler {
         await _supabase.auth.signInAnonymously();
       }
 
-      final masterArchive = Archive();
-
-      // 2. Process each file into the master payload
+      // 2. Read each file for the master payload
+      List<Map<String, dynamic>> filesData = [];
       for (int i = 0; i < files.length; i++) {
         onProgress?.call('Processing file ${i + 1} of ${files.length}...');
         final bytes = await files[i].readAsBytes();
@@ -39,18 +36,18 @@ class SharingHandler {
           if (!name.toLowerCase().endsWith('.zip')) {
             name = 'archive_$i.zip';
           }
-          masterArchive.addFile(ArchiveFile(name, bytes.length, bytes));
+          filesData.add({'name': name, 'bytes': bytes});
         } else {
-          onProgress?.call('Packaging file ${i + 1} for WebP compression...');
-          masterArchive.addFile(ArchiveFile(files[i].name, bytes.length, bytes));
+          onProgress?.call('Packaging file ${i + 1} for compression...');
+          filesData.add({'name': files[i].name, 'bytes': bytes});
         }
       }
 
       onProgress?.call('Packaging files into archive...');
-      final masterZipBytes = ZipEncoder().encode(masterArchive)!;
+      final masterZipBytes = await compute(_encodeZipTask, filesData);
 
       // 3. Upload to Supabase and construct link payload
-      onProgress?.call('Uploading package to Supabase...');
+      onProgress?.call('Uploading package to database...');
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final masterPath = 'shared/${timestamp}_master.zip';
       const bucketName = 'uploads';
@@ -64,7 +61,7 @@ class SharingHandler {
       // 4. Create an HTTPS deep link
       onProgress?.call('Generating shareable link...');
       final typeStr = isZipFiles ? 'zip' : 'webp';
-      final deepLink = 'https://bytesized.app/share?path=${Uri.encodeComponent(masterPath)}&type=$typeStr';
+      final deepLink = 'https://ruling-teal-cdzsd03xyd.edgeone.app/?path=${Uri.encodeComponent(masterPath)}&type=$typeStr';
 
       return deepLink;
     } catch (e) {
@@ -81,20 +78,20 @@ class SharingHandler {
   /// Listens for incoming deep links
   void listenForDeepLinks(
       Function(List<Uint8List> bytesList, List<String> names, String type) onDataReceived,
-      {Function(String)? onStatus}) {
+      {Function(String)? onStatus, Function()? onStarted, Function()? onDone}) {
     _appLinks.uriLinkStream.listen((uri) {
-      _handleIncomingUri(uri, onDataReceived, onStatus: onStatus);
+      _handleIncomingUri(uri, onDataReceived, onStatus: onStatus, onStarted: onStarted, onDone: onDone);
     });
   }
 
   /// Checks if the app was started by a deep link
   Future<void> checkInitialLink(
       Function(List<Uint8List> bytesList, List<String> names, String type) onDataReceived,
-      {Function(String)? onStatus}) async {
+      {Function(String)? onStatus, Function()? onStarted, Function()? onDone}) async {
     try {
       final uri = await _appLinks.getInitialLink();
       if (uri != null) {
-        _handleIncomingUri(uri, onDataReceived, onStatus: onStatus);
+        await _handleIncomingUri(uri, onDataReceived, onStatus: onStatus, onStarted: onStarted, onDone: onDone);
       }
     } catch (e) {
       debugPrint('Error checking initial link: $e');
@@ -104,11 +101,13 @@ class SharingHandler {
 
   Future<void> _handleIncomingUri(
       Uri uri, Function(List<Uint8List> bytesList, List<String> names, String type) onDataReceived,
-      {Function(String)? onStatus}) async {
+      {Function(String)? onStatus, Function()? onStarted, Function()? onDone}) async {
     final isCustomScheme = uri.scheme == 'bytesized' && uri.host == 'reconstruct';
-    final isAppLink = uri.scheme == 'https' && uri.host == 'bytesized.app' && uri.path.startsWith('/share');
+    final isAppLink = uri.scheme == 'https' && uri.host == 'ruling-teal-cdzsd03xyd.edgeone.app';
 
     if (!(isCustomScheme || isAppLink)) return;
+
+    onStarted?.call();
 
     final path = uri.queryParameters['path'];
     final type = uri.queryParameters['type'] ?? 'zip';
@@ -122,25 +121,46 @@ class SharingHandler {
         final masterBytes = await _supabase.storage.from('uploads').download(path);
         
         onStatus?.call('Extracting files...');
-        final archive = ZipDecoder().decodeBytes(masterBytes);
+        final extractedData = await compute(_decodeZipTask, masterBytes);
 
-        List<Uint8List> bytesList = [];
-        List<String> names = [];
-
-        for (final file in archive) {
-          if (file.isFile) {
-            bytesList.add(Uint8List.fromList(file.content as List<int>));
-            names.add(file.name);
-          }
-        }
-
-        if (bytesList.isNotEmpty) {
-          onDataReceived(bytesList, names, type);
+        if (extractedData['bytesList'].isNotEmpty) {
+          onDataReceived(extractedData['bytesList'], extractedData['names'], type);
         }
       } catch (e) {
         debugPrint('Failed to process incoming link: $e');
         onStatus?.call('Failed to open link');
+      } finally {
+        onDone?.call();
       }
+    } else {
+      onDone?.call();
     }
   }
+}
+
+// --- Isolate Tasks for CPU-intensive ZIP operations ---
+
+List<int> _encodeZipTask(List<Map<String, dynamic>> filesData) {
+  final archive = Archive();
+  for (final fileData in filesData) {
+    final name = fileData['name'] as String;
+    final bytes = fileData['bytes'] as Uint8List;
+    archive.addFile(ArchiveFile(name, bytes.length, bytes));
+  }
+  return ZipEncoder().encode(archive)!;
+}
+
+Map<String, dynamic> _decodeZipTask(Uint8List zipBytes) {
+  final archive = ZipDecoder().decodeBytes(zipBytes);
+  List<Uint8List> bytesList = [];
+  List<String> names = [];
+
+  for (final file in archive) {
+    if (file.isFile) {
+      bytesList.add(Uint8List.fromList(file.content as List<int>));
+      names.add(file.name);
+    }
+  }
+  
+  return {'bytesList': bytesList, 'names': names};
 }

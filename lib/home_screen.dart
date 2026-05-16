@@ -144,6 +144,116 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Future<void> _clearRecentFiles() async {
+    bool confirm = await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('Clear History', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Are you sure you want to clear all recent files? This will delete them from your device.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Clear', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    ) ?? false;
+
+    if (!confirm) return;
+
+    setState(() => _loadingHistory = true);
+    try {
+      for (var file in _recentFiles) {
+        if (file.existsSync()) {
+          file.deleteSync();
+        }
+      }
+      if (mounted) {
+        setState(() {
+          _recentFiles.clear();
+        });
+      }
+    } catch (e) {
+      debugPrint('Error clearing files: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _loadingHistory = false);
+      }
+    }
+  }
+
+  void _showImagePreview(File file) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Stack(
+                alignment: Alignment.topRight,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.file(
+                      file,
+                      fit: BoxFit.contain,
+                      cacheWidth: 1080, // High quality for preview, but still capped to prevent OOM
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Container(
+                      decoration: const BoxDecoration(
+                        color: Colors.black54,
+                        shape: BoxShape.circle,
+                      ),
+                      child: IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white, size: 24),
+                        onPressed: () => Navigator.pop(ctx),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.pop(ctx);
+                // Since the file is already stored in the app's Download directory
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('File is already saved at:\n${file.path}'),
+                    duration: const Duration(seconds: 4),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              },
+              icon: const Icon(Icons.download_rounded),
+              label: const Text('Download / Save'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF3B82F6),
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -253,13 +363,24 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
               const SizedBox(height: 32),
-              const Text(
-                'Recent Files',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Recent Files',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (_recentFiles.isNotEmpty)
+                    TextButton.icon(
+                      onPressed: _clearRecentFiles,
+                      icon: const Icon(Icons.delete_sweep_rounded, color: Colors.redAccent, size: 20),
+                      label: const Text('Clear', style: TextStyle(color: Colors.redAccent)),
+                    ),
+                ],
               ),
               const SizedBox(height: 16),
               Expanded(
@@ -282,20 +403,23 @@ class _HomeScreenState extends State<HomeScreen> {
                             itemCount: _recentFiles.length,
                             itemBuilder: (context, index) {
                               final file = _recentFiles[index];
-                              return ClipRRect(
-                                borderRadius: BorderRadius.circular(12),
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    Image.file(
-                                      file,
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (_, __, ___) => Container(
-                                        color: const Color(0xFF1A1A1A),
-                                        child: const Icon(Icons.broken_image, color: Colors.white54),
+                              return GestureDetector(
+                                onTap: () => _showImagePreview(file),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      Image.file(
+                                        file,
+                                        fit: BoxFit.cover,
+                                        cacheWidth: 300, // PERFORMANCE FIX: Stops the app from lagging when scrolling
+                                        errorBuilder: (_, __, ___) => Container(
+                                          color: const Color(0xFF1A1A1A),
+                                          child: const Icon(Icons.broken_image, color: Colors.white54),
+                                        ),
                                       ),
-                                    ),
-                                    Positioned(
+                                      Positioned(
                                       bottom: 0, left: 0, right: 0,
                                       child: Container(
                                         padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
@@ -315,6 +439,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                       ),
                                     ),
                                   ],
+                                ),
                                 ),
                               );
                             },

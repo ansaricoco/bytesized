@@ -27,23 +27,30 @@ return result;
 
 /// Compresses an image while attempting to stay under the preset's [maxSize].
 Future<Uint8List> compressWithPreset(Uint8List inputBytes, AppPreset preset) async {
-int currentQuality = preset.quality;
-Uint8List compressed = await encodeToWebP(inputBytes, quality: currentQuality);
+  Uint8List bestFit = await encodeToWebP(inputBytes, quality: preset.quality);
 
 // Check if the result is already within the limit
-if (compressed.lengthInBytes <= preset.maxSize) {
-return compressed;
+  if (bestFit.lengthInBytes <= preset.maxSize) return bestFit;
+
+  // Binary search for optimal quality to minimize heavy compression passes
+  int minQuality = 10;
+  int maxQuality = preset.quality - 1;
+  Uint8List? lastCompressed;
+
+  while (minQuality <= maxQuality) {
+    int currentQuality = minQuality + ((maxQuality - minQuality) >> 1);
+    final compressed = await encodeToWebP(inputBytes, quality: currentQuality);
+    lastCompressed = compressed;
+
+    if (compressed.lengthInBytes <= preset.maxSize) {
+      bestFit = compressed;
+      minQuality = currentQuality + 1; // Try to get higher quality that still fits
+    } else {
+      maxQuality = currentQuality - 1; // Need lower quality to fit
+    }
 }
 
-// Iteratively reduce quality if the file is still too large
-// In a production app, you might also consider downscaling dimensions 
-// if quality reduction isn't enough.
-while (compressed.lengthInBytes > preset.maxSize && currentQuality > 10) {
-currentQuality -= 10;
-compressed = await encodeToWebP(inputBytes, quality: currentQuality);
-}
-
-return compressed;
+  return bestFit.lengthInBytes <= preset.maxSize ? bestFit : (lastCompressed ?? bestFit);
 }
 
 Uint8List _encodeFallbackTask(Map<String, dynamic> data) {
@@ -88,11 +95,11 @@ for (int x = 0; x < origImg.width; x++) {
 final origP = origImg.getPixel(x, y);
 final lossyP = lossyImg.getPixel(x, y);
 
-// Modular arithmetic guarantees 100% perfect 1:1 lossless reconstruction
-final r = (origP.r.toInt() - lossyP.r.toInt()) % 256;
-final g = (origP.g.toInt() - lossyP.g.toInt()) % 256;
-final b = (origP.b.toInt() - lossyP.b.toInt()) % 256;
-final a = (origP.a.toInt() - lossyP.a.toInt()) % 256;
+      // Bitwise AND is significantly faster than modulo for 8-bit wrapping
+      final r = (origP.r.toInt() - lossyP.r.toInt()) & 0xFF;
+      final g = (origP.g.toInt() - lossyP.g.toInt()) & 0xFF;
+      final b = (origP.b.toInt() - lossyP.b.toInt()) & 0xFF;
+      final a = (origP.a.toInt() - lossyP.a.toInt()) & 0xFF;
 
 residualImg.setPixelRgba(x, y, r, g, b, a);
 }
@@ -128,11 +135,11 @@ for (int x = 0; x < residualImg.width; x++) {
 final lossyP = lossyImg.getPixel(x, y);
 final resP = residualImg.getPixel(x, y);
 
-// Perfect 1:1 inversion using modulo 256
-final r = (lossyP.r.toInt() + resP.r.toInt()) % 256;
-final g = (lossyP.g.toInt() + resP.g.toInt()) % 256;
-final b = (lossyP.b.toInt() + resP.b.toInt()) % 256;
-final a = (lossyP.a.toInt() + resP.a.toInt()) % 256;
+      // Bitwise AND is significantly faster than modulo for 8-bit wrapping
+      final r = (lossyP.r.toInt() + resP.r.toInt()) & 0xFF;
+      final g = (lossyP.g.toInt() + resP.g.toInt()) & 0xFF;
+      final b = (lossyP.b.toInt() + resP.b.toInt()) & 0xFF;
+      final a = (lossyP.a.toInt() + resP.a.toInt()) & 0xFF;
 
 reconstructedImg.setPixelRgba(x, y, r, g, b, a);
 }
@@ -187,34 +194,31 @@ Map<String, double> _computeMetricsTask(Map<String, dynamic> data) {
   for (int y = 0; y <= img1.height - winSize; y += winSize) {
     for (int x = 0; x <= img1.width - winSize; x += winSize) {
       double sum1 = 0, sum2 = 0;
+      double sumSq1 = 0, sumSq2 = 0, sumCross = 0;
+      
       for (int wy = 0; wy < winSize; wy++) {
         for (int wx = 0; wx < winSize; wx++) {
           final p1 = img1.getPixel(x + wx, y + wy);
           final p2 = img2.getPixel(x + wx, y + wy);
           final l1 = 0.299 * p1.r + 0.587 * p1.g + 0.114 * p1.b;
           final l2 = 0.299 * p2.r + 0.587 * p2.g + 0.114 * p2.b;
+          
           sum1 += l1;
           sum2 += l2;
+          sumSq1 += l1 * l1;
+          sumSq2 += l2 * l2;
+          sumCross += l1 * l2;
         }
       }
-      final mu1 = sum1 / (winSize * winSize);
-      final mu2 = sum2 / (winSize * winSize);
 
-      double var1 = 0, var2 = 0, cov = 0;
-      for (int wy = 0; wy < winSize; wy++) {
-        for (int wx = 0; wx < winSize; wx++) {
-          final p1 = img1.getPixel(x + wx, y + wy);
-          final p2 = img2.getPixel(x + wx, y + wy);
-          final l1 = 0.299 * p1.r + 0.587 * p1.g + 0.114 * p1.b;
-          final l2 = 0.299 * p2.r + 0.587 * p2.g + 0.114 * p2.b;
-          var1 += (l1 - mu1) * (l1 - mu1);
-          var2 += (l2 - mu2) * (l2 - mu2);
-          cov += (l1 - mu1) * (l2 - mu2);
-        }
-      }
-      var1 /= (winSize * winSize);
-      var2 /= (winSize * winSize);
-      cov /= (winSize * winSize);
+      final double n = (winSize * winSize).toDouble();
+      final mu1 = sum1 / n;
+      final mu2 = sum2 / n;
+
+      // Optimized one-pass variance and covariance
+      final var1 = (sumSq1 / n) - (mu1 * mu1);
+      final var2 = (sumSq2 / n) - (mu2 * mu2);
+      final cov = (sumCross / n) - (mu1 * mu2);
 
       final ssim = ((2 * mu1 * mu2 + c1) * (2 * cov + c2)) /
                    ((mu1 * mu1 + mu2 * mu2 + c1) * (var1 + var2 + c2));
