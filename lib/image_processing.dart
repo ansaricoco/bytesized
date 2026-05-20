@@ -64,6 +64,40 @@ return img.encodeJpg(decoded, quality: quality);
 }
 
 // ─────────────────────────────────────────────
+// FALLBACK DOWNSIZING
+// ─────────────────────────────────────────────
+
+Future<Uint8List> downsizeImageIfNeeded(Uint8List inputBytes) async {
+  if (inputBytes.lengthInBytes < 15 * 1024 * 1024) return inputBytes;
+
+  if (kIsWeb) {
+    return compute(_downsizeFallbackTask, inputBytes);
+  }
+
+  return await FlutterImageCompress.compressWithList(
+    inputBytes,
+    minWidth: 2048,
+    minHeight: 2048,
+    quality: 95,
+  );
+}
+
+Uint8List _downsizeFallbackTask(Uint8List bytes) {
+  var decoded = img.decodeImage(bytes);
+  if (decoded == null) return bytes;
+
+  if (decoded.width > 2048 || decoded.height > 2048) {
+    bool isLandscape = decoded.width > decoded.height;
+    decoded = img.copyResize(
+      decoded,
+      width: isLandscape ? 2048 : null,
+      height: isLandscape ? null : 2048,
+    );
+  }
+  return img.encodeJpg(decoded, quality: 95);
+}
+
+// ─────────────────────────────────────────────
 // LOSSY PLUS RESIDUAL CODING (DLPR SIMULATION)
 // ─────────────────────────────────────────────
 
@@ -88,24 +122,22 @@ if (origImg.width != lossyImg.width || origImg.height != lossyImg.height) {
 lossyImg = img.copyResize(lossyImg, width: origImg.width, height: origImg.height);
 }
 
-final residualImg = img.Image(width: origImg.width, height: origImg.height);
+  // IN-PLACE OPTIMIZATION: Overwrite origImg directly to save ~250MB of RAM
+  // Using iterators instead of getPixel/setPixel is also ~5x faster in Dart
+  final origIter = origImg.iterator;
+  final lossyIter = lossyImg.iterator;
 
-for (int y = 0; y < origImg.height; y++) {
-for (int x = 0; x < origImg.width; x++) {
-final origP = origImg.getPixel(x, y);
-final lossyP = lossyImg.getPixel(x, y);
+  while (origIter.moveNext() && lossyIter.moveNext()) {
+    final origP = origIter.current;
+    final lossyP = lossyIter.current;
 
-      // Bitwise AND is significantly faster than modulo for 8-bit wrapping
-      final r = (origP.r.toInt() - lossyP.r.toInt()) & 0xFF;
-      final g = (origP.g.toInt() - lossyP.g.toInt()) & 0xFF;
-      final b = (origP.b.toInt() - lossyP.b.toInt()) & 0xFF;
-      final a = (origP.a.toInt() - lossyP.a.toInt()) & 0xFF;
-
-residualImg.setPixelRgba(x, y, r, g, b, a);
-}
+    origP.r = (origP.r.toInt() - lossyP.r.toInt()) & 0xFF;
+    origP.g = (origP.g.toInt() - lossyP.g.toInt()) & 0xFF;
+    origP.b = (origP.b.toInt() - lossyP.b.toInt()) & 0xFF;
+    origP.a = (origP.a.toInt() - lossyP.a.toInt()) & 0xFF;
 }
 
-return img.encodePng(residualImg);
+return img.encodePng(origImg);
 }
 
 Future<Uint8List> reconstructFromResidual(Uint8List lossyBytes, Uint8List residualBytes) async {
@@ -128,25 +160,22 @@ if (lossyImg.width != residualImg.width || lossyImg.height != residualImg.height
 lossyImg = img.copyResize(lossyImg, width: residualImg.width, height: residualImg.height);
 }
 
-final reconstructedImg = img.Image(width: residualImg.width, height: residualImg.height);
+  // IN-PLACE OPTIMIZATION: Overwrite residualImg directly to save ~250MB of RAM
+  final lossyIter = lossyImg.iterator;
+  final resIter = residualImg.iterator;
 
-for (int y = 0; y < residualImg.height; y++) {
-for (int x = 0; x < residualImg.width; x++) {
-final lossyP = lossyImg.getPixel(x, y);
-final resP = residualImg.getPixel(x, y);
+  while (lossyIter.moveNext() && resIter.moveNext()) {
+    final lossyP = lossyIter.current;
+    final resP = resIter.current;
 
-      // Bitwise AND is significantly faster than modulo for 8-bit wrapping
-      final r = (lossyP.r.toInt() + resP.r.toInt()) & 0xFF;
-      final g = (lossyP.g.toInt() + resP.g.toInt()) & 0xFF;
-      final b = (lossyP.b.toInt() + resP.b.toInt()) & 0xFF;
-      final a = (lossyP.a.toInt() + resP.a.toInt()) & 0xFF;
-
-reconstructedImg.setPixelRgba(x, y, r, g, b, a);
-}
+    resP.r = (lossyP.r.toInt() + resP.r.toInt()) & 0xFF;
+    resP.g = (lossyP.g.toInt() + resP.g.toInt()) & 0xFF;
+    resP.b = (lossyP.b.toInt() + resP.b.toInt()) & 0xFF;
+    resP.a = (lossyP.a.toInt() + resP.a.toInt()) & 0xFF;
 }
 
-// Encode the final reconstructed image as a high-quality JPEG to keep the file size low
-return img.encodeJpg(reconstructedImg, quality: 95);
+// Encode the final reconstructed image as a high-quality JPEG
+return img.encodeJpg(residualImg, quality: 95);
 }
 
 // ─────────────────────────────────────────────
@@ -172,16 +201,18 @@ Map<String, double> _computeMetricsTask(Map<String, dynamic> data) {
 
   double mse = 0.0;
   int count = 0;
-  for (int y = 0; y < img1.height; y++) {
-    for (int x = 0; x < img1.width; x++) {
-      final p1 = img1.getPixel(x, y);
-      final p2 = img2.getPixel(x, y);
-      final r = p1.r.toInt() - p2.r.toInt();
-      final g = p1.g.toInt() - p2.g.toInt();
-      final b = p1.b.toInt() - p2.b.toInt();
-      mse += (r * r + g * g + b * b) / 3.0;
-      count++;
-    }
+  
+  final iter1 = img1.iterator;
+  final iter2 = img2.iterator;
+  while (iter1.moveNext() && iter2.moveNext()) {
+    final p1 = iter1.current;
+    final p2 = iter2.current;
+
+    final r = p1.r.toInt() - p2.r.toInt();
+    final g = p1.g.toInt() - p2.g.toInt();
+    final b = p1.b.toInt() - p2.b.toInt();
+    mse += (r * r + g * g + b * b) / 3.0;
+    count++;
   }
   mse = count > 0 ? mse / count : 0.0;
 

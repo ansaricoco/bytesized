@@ -1,9 +1,11 @@
 import 'dart:io';
-
+import 'dart:ui' as ui;
+ 
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../app_preset.dart';
@@ -37,15 +39,13 @@ Archive _decodeZipTask(Uint8List bytes) {
 enum ActionMode { compress, decompress }
 
 class ResultScreen extends StatefulWidget {
-  final List<Uint8List> imageBytesList;
-  final List<String> fileNames;
+  final List<XFile> files;
   final ActionMode mode;
   final AppPreset? preset;
 
   const ResultScreen({
     super.key,
-    required this.imageBytesList,
-    required this.fileNames,
+    required this.files,
     required this.mode,
     this.preset,
   });
@@ -61,6 +61,8 @@ class _ResultScreenState extends State<ResultScreen> {
   late List<bool> _processingList;
   late List<Uint8List?> _resultBytesList;
   late List<Uint8List?> _residualBytesList;
+  late List<Uint8List?> _inputDisplayBytesList;
+  late List<int?> _originalSizeList;
   late List<String?> _errorMsgList;
   late List<String?> _inputResolutionList;
   late List<String?> _resultResolutionList;
@@ -76,54 +78,85 @@ class _ResultScreenState extends State<ResultScreen> {
   @override
   void initState() {
     super.initState();
-    final count = widget.imageBytesList.length;
+    final count = widget.files.length;
     _processingList = List.filled(count, true);
     _resultBytesList = List.filled(count, null);
     _residualBytesList = List.filled(count, null);
+    _inputDisplayBytesList = List.filled(count, null);
+    _originalSizeList = List.filled(count, null);
     _errorMsgList = List.filled(count, null);
     _inputResolutionList = List.filled(count, null);
     _resultResolutionList = List.filled(count, null);
     _mseList = List.filled(count, null);
     _ssimList = List.filled(count, null);
 
+    _processAllSequentially(count);
+  }
+
+  Future<void> _processAllSequentially(int count) async {
     for (int i = 0; i < count; i++) {
-      _fetchInputResolution(i);
-      _process(i);
+      await _fetchInputResolution(i);
+      await _process(i);
     }
   }
 
   Future<void> _fetchInputResolution(int index) async {
     try {
-      final img = await decodeImageFromList(widget.imageBytesList[index]);
+      final len = await widget.files[index].length();
       if (mounted) {
-        setState(() => _inputResolutionList[index] = '${img.width} x ${img.height}');
+        setState(() => _originalSizeList[index] = len);
       }
+      // Use ImageDescriptor to read metadata without decoding the full image into memory.
+      // This is critical for preventing crashes on very large images.
+      final buffer = kIsWeb
+          ? await ui.ImmutableBuffer.fromUint8List(await widget.files[index].readAsBytes())
+          : await ui.ImmutableBuffer.fromFilePath(widget.files[index].path);
+      final descriptor = await ui.ImageDescriptor.encoded(buffer);
+      if (mounted) {
+        setState(() => _inputResolutionList[index] = '${descriptor.width} x ${descriptor.height}');
+      }
+      descriptor.dispose();
+      buffer.dispose();
     } catch (_) {}
   }
 
   Future<void> _process(int index) async {
     try {
       Uint8List result;
-      final imageBytes = widget.imageBytesList[index];
-      final fileName = widget.fileNames[index];
+      final originalImageBytes = await widget.files[index].readAsBytes();
+      final fileName = widget.files[index].name;
+
+      Uint8List bytesForProcessing = originalImageBytes;
+      bool wasDownsized = false;
+
+      if (!fileName.toLowerCase().endsWith('.zip') && originalImageBytes.lengthInBytes >= 15 * 1024 * 1024) {
+        bytesForProcessing = await downsizeImageIfNeeded(originalImageBytes);
+        wasDownsized = true;
+      }
+
+      _inputDisplayBytesList[index] = bytesForProcessing;
 
       if (widget.mode == ActionMode.compress) {
         final quality = widget.preset?.quality ?? 80;
-        result = await encodeToWebP(imageBytes, quality: quality);
-        final residual = await computeResidual(imageBytes, result);
-        
-        final metrics = await computeImageMetrics(imageBytes, result);
+        result = await encodeToWebP(bytesForProcessing, quality: quality);
 
-        if (mounted) {
-          setState(() {
-            _residualBytesList[index] = residual;
-            _mseList[index] = metrics['mse'];
-            _ssimList[index] = metrics['ssim'];
-          });
+        // Only compute residual and metrics if the image was not downsized,
+        // as they are not meaningful otherwise.
+        if (!wasDownsized) {
+          final residual = await computeResidual(originalImageBytes, result);
+          final metrics = await computeImageMetrics(originalImageBytes, result);
+
+          if (mounted) {
+            setState(() {
+              _residualBytesList[index] = residual;
+              _mseList[index] = metrics['mse'];
+              _ssimList[index] = metrics['ssim'];
+            });
+          }
         }
       } else {
-        if (fileName.toLowerCase().endsWith('.zip')) {
-          final archive = await compute(_decodeZipTask, imageBytes);
+        if (fileName.toLowerCase().endsWith('.zip')) { // Decompress mode
+          final archive = await compute(_decodeZipTask, originalImageBytes);
           ArchiveFile? lossyFile;
           ArchiveFile? residualFile;
           ArchiveFile? originalFile;
@@ -150,14 +183,18 @@ class _ResultScreenState extends State<ResultScreen> {
             throw Exception('Invalid ZIP format: missing image.webp');
           }
         } else {
-          result = imageBytes;
+          result = originalImageBytes;
         }
       }
 
       String? resResolution;
       try {
-        final img = await decodeImageFromList(result);
-        resResolution = '${img.width} x ${img.height}';
+        // Use ImageDescriptor for memory-safe resolution checking of the result.
+        final buffer = await ui.ImmutableBuffer.fromUint8List(result);
+        final descriptor = await ui.ImageDescriptor.encoded(buffer);
+        resResolution = '${descriptor.width} x ${descriptor.height}';
+        descriptor.dispose();
+        buffer.dispose();
       } catch (_) {}
 
       if (mounted) {
@@ -189,7 +226,7 @@ class _ResultScreenState extends State<ResultScreen> {
         processingText: 'Saving image...',
         saveTask: () async {
           final isCompress = widget.mode == ActionMode.compress;
-          final fileName = widget.fileNames[index];
+        final fileName = widget.files[index].name;
           final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
 
           final ext = isCompress 
@@ -226,8 +263,8 @@ class _ResultScreenState extends State<ResultScreen> {
         title: 'Saved!',
         processingText: 'Saving ZIP archive...',
         saveTask: () async {
-          if (widget.mode == ActionMode.decompress && widget.fileNames[index].toLowerCase().endsWith('.zip')) {
-            final zipBytes = widget.imageBytesList[index];
+          if (widget.mode == ActionMode.decompress && widget.files[index].name.toLowerCase().endsWith('.zip')) {
+            final zipBytes = await widget.files[index].readAsBytes();
             final outName = 'downloaded_archive_${DateTime.now().millisecondsSinceEpoch}.zip';
 
             if (kIsWeb) {
@@ -251,7 +288,7 @@ class _ResultScreenState extends State<ResultScreen> {
           final zipBytesNullable = await compute(_encodeZipTask, {
             'result': resultBytes,
             'residual': residualBytes,
-            'original': widget.imageBytesList[index],
+            'original': await widget.files[index].readAsBytes(),
           });
           
           if (zipBytesNullable == null) {
@@ -290,12 +327,12 @@ class _ResultScreenState extends State<ResultScreen> {
         processingText: 'Saving all images...',
         saveTask: () async {
           int savedCount = 0;
-          for (int i = 0; i < widget.imageBytesList.length; i++) {
+          for (int i = 0; i < widget.files.length; i++) {
             final result = _resultBytesList[i];
             if (result == null) continue;
 
             final isCompress = widget.mode == ActionMode.compress;
-            final fileName = widget.fileNames[i];
+            final fileName = widget.files[i].name;
             final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
 
             final ext = isCompress 
@@ -326,8 +363,8 @@ class _ResultScreenState extends State<ResultScreen> {
   @override
   Widget build(BuildContext context) {
     final isCompress = widget.mode == ActionMode.compress;
-    final hasMultiple = widget.imageBytesList.length > 1;
-    final currentFileName = widget.fileNames.isNotEmpty ? widget.fileNames[_currentIndex] : '';
+    final hasMultiple = widget.files.length > 1;
+    final currentFileName = widget.files.isNotEmpty ? widget.files[_currentIndex].name : '';
     final isZipDecompress = !isCompress && currentFileName.toLowerCase().endsWith('.zip');
 
     return Scaffold(
@@ -337,7 +374,7 @@ class _ResultScreenState extends State<ResultScreen> {
         foregroundColor: Colors.white,
         title: Text(
           hasMultiple 
-              ? '${isCompress ? 'Compress' : (isZipDecompress ? 'Decompress' : 'View')} (${_currentIndex + 1}/${widget.imageBytesList.length})'
+              ? '${isCompress ? 'Compress' : (isZipDecompress ? 'Decompress' : 'View')} (${_currentIndex + 1}/${widget.files.length})'
               : (isCompress ? 'Compress to WebP' : (isZipDecompress ? 'Reconstructed (Lossy + Residual)' : 'Downloaded Image')),
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
@@ -354,12 +391,13 @@ class _ResultScreenState extends State<ResultScreen> {
       body: PageView.builder(
         controller: _pageController,
         onPageChanged: (index) => setState(() => _currentIndex = index),
-        itemCount: widget.imageBytesList.length,
+        itemCount: widget.files.length,
         itemBuilder: (context, index) {
           return _ResultItemView(
             key: PageStorageKey(index),
-            imageBytes: widget.imageBytesList[index],
-            fileName: widget.fileNames[index],
+            file: widget.files[index],
+            inputBytesForDisplay: _inputDisplayBytesList[index],
+            originalSize: _originalSizeList[index],
             mode: widget.mode,
             preset: widget.preset,
             processing: _processingList[index],
@@ -509,8 +547,9 @@ class _SaveDialogState extends State<SaveDialog> {
 }
 
 class _ResultItemView extends StatelessWidget {
-  final Uint8List imageBytes;
-  final String fileName;
+  final XFile file;
+  final Uint8List? inputBytesForDisplay;
+  final int? originalSize;
   final ActionMode mode;
   final AppPreset? preset;
 
@@ -528,8 +567,9 @@ class _ResultItemView extends StatelessWidget {
 
   const _ResultItemView({
     super.key,
-    required this.imageBytes,
-    required this.fileName,
+    required this.file,
+    this.inputBytesForDisplay,
+    required this.originalSize,
     required this.mode,
     this.preset,
     required this.processing,
@@ -544,12 +584,11 @@ class _ResultItemView extends StatelessWidget {
     required this.onSaveZip,
   });
 
-  int get _originalSize => imageBytes.length;
   int get _resultSize => resultBytes?.length ?? 0;
 
   double get _savingsPercent {
-    if (_resultSize == 0) return 0;
-    return ((_originalSize - _resultSize) / _originalSize * 100)
+    if (_resultSize == 0 || originalSize == null || originalSize == 0) return 0;
+    return ((originalSize! - _resultSize) / originalSize! * 100)
         .clamp(-999.0, 999.0);
   }
 
@@ -559,11 +598,39 @@ class _ResultItemView extends StatelessWidget {
     return '${(bytes / 1048576).toStringAsFixed(2)} MB';
   }
 
+  Widget _buildInputImage() {
+    // If the downsized (or original) bytes are ready for display, show them.
+    if (inputBytesForDisplay != null) {
+      return Image.memory(
+        inputBytesForDisplay!,
+        width: double.infinity,
+        fit: BoxFit.contain,
+      );
+    }
+
+    // IMPORTANT: For large images, show a loader instead of Image.file() to prevent crashes.
+    // The view will update with the downsized image once processing provides the bytes.
+    if ((originalSize ?? 0) >= 15 * 1024 * 1024 && !kIsWeb) {
+      return Container(
+        height: 200,
+        decoration: BoxDecoration(color: const Color(0xFF1A1A1A), borderRadius: BorderRadius.circular(10)),
+        child: const Center(child: CircularProgressIndicator(color: Color(0xFF3B82F6))),
+      );
+    }
+
+    // For small images or web, render directly from the file path.
+    return kIsWeb
+        ? Image.network(file.path, width: double.infinity, fit: BoxFit.contain)
+        : Image.file(File(file.path), width: double.infinity, fit: BoxFit.contain);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final fileName = file.name;
     final isCompress = mode == ActionMode.compress;
     final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
     final isJustViewing = !isCompress && !isZipDecompress;
+    final wasDownsized = isCompress && mse == null && ssim == null && !processing && errorMsg == null;
 
     return SingleChildScrollView(
         padding: const EdgeInsets.all(20),
@@ -597,23 +664,15 @@ class _ResultItemView extends StatelessWidget {
                 )
               else
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 400),
-                    child: Image.memory(
-                      imageBytes,
-                      width: double.infinity,
-                      fit: BoxFit.contain,
-                    ),
-                  ),
+                  borderRadius: BorderRadius.circular(10), child: _buildInputImage(),
                 ),
               const SizedBox(height: 8),
               _InfoRow(
                   label: 'Format',
                   value: fileName.split('.').last.toUpperCase()),
               const SizedBox(height: 4),
-              _InfoRow(
-                  label: 'Size', value: _formatSize(_originalSize)),
+            _InfoRow(
+                label: 'Size', value: originalSize != null ? _formatSize(originalSize!) : 'Calculating...'),
               if (inputResolution != null) ...[
                 const SizedBox(height: 4),
                 _InfoRow(label: 'Resolution', value: inputResolution!),
@@ -706,7 +765,10 @@ class _ResultItemView extends StatelessWidget {
                 const SizedBox(height: 4),
                 _InfoRow(label: 'Resolution', value: resultResolution!),
               ],
-              if (mse != null && ssim != null) ...[
+              if (wasDownsized) ...[
+                const SizedBox(height: 4),
+                const _InfoRow(label: 'Metrics', value: 'Skipped (Image was downsized)', valueColor: Colors.white54),
+              ] else if (mse != null && ssim != null) ...[
                 const SizedBox(height: 4),
                 _InfoRow(label: 'MSE (vs Original)', value: mse!.toStringAsFixed(2)),
                 const SizedBox(height: 4),

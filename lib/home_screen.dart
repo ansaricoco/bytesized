@@ -38,13 +38,15 @@ class _HomeScreenState extends State<HomeScreen> {
     _sharingHandler.listenForDeepLinks((bytesList, names, type) {
       if (mounted) {
         final mode = type == 'webp' ? ActionMode.compress : ActionMode.decompress;
-        _navigateToResult(bytesList, names, mode);
+        final files = List.generate(bytesList.length, (i) => XFile.fromData(bytesList[i], name: names[i]));
+        _checkSizeAndNavigate(files, mode);
       }
     });
     _sharingHandler.checkInitialLink((bytesList, names, type) {
       if (mounted) {
         final mode = type == 'webp' ? ActionMode.compress : ActionMode.decompress;
-        _navigateToResult(bytesList, names, mode);
+        final files = List.generate(bytesList.length, (i) => XFile.fromData(bytesList[i], name: names[i]));
+        _checkSizeAndNavigate(files, mode);
       }
     });
   }
@@ -86,13 +88,7 @@ class _HomeScreenState extends State<HomeScreen> {
       // or maxHeight forces the OS to re-encode the image, inflating its size.
       final List<XFile> files = await _picker.pickMultiImage();
       if (files.isNotEmpty && mounted) {
-        List<Uint8List> bytesList = [];
-        List<String> names = [];
-        for (var file in files.take(5)) {
-          bytesList.add(await file.readAsBytes());
-          names.add(file.name);
-        }
-        await _navigateToResult(bytesList, names, mode);
+        await _checkSizeAndNavigate(files.take(5).toList(), mode);
       }
     } else {
       // Use file_picker for decompression to allow selecting .zip archives
@@ -102,32 +98,64 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       
       if (result != null && mounted) {
-        List<Uint8List> bytesList = [];
-        List<String> names = [];
+        List<XFile> files = [];
         for (var file in result.files.take(5)) {
-          Uint8List? bytes = file.bytes;
-          if (bytes == null && file.path != null) {
-            bytes = await File(file.path!).readAsBytes();
-          }
-          if (bytes != null) {
-            bytesList.add(bytes);
-            names.add(file.name);
+          if (file.path != null) {
+            files.add(XFile(file.path!));
+          } else if (file.bytes != null) {
+            files.add(XFile.fromData(file.bytes!, name: file.name));
           }
         }
-        if (bytesList.isNotEmpty) {
-          await _navigateToResult(bytesList, names, mode);
+        if (files.isNotEmpty) {
+          await _checkSizeAndNavigate(files, mode);
         }
       }
     }
   }
 
-  Future<void> _navigateToResult(List<Uint8List> bytesList, List<String> fileNames, ActionMode mode) async {
+  Future<void> _checkSizeAndNavigate(List<XFile> files, ActionMode mode) async {
+    bool hasLargeImage = false;
+    for (var file in files) {
+      if (!file.name.toLowerCase().endsWith('.zip')) {
+        final len = await file.length();
+        if (len >= 15 * 1024 * 1024) {
+          hasLargeImage = true;
+          break;
+        }
+      }
+    }
+
+    if (hasLargeImage && mounted) {
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A1A),
+          title: const Text('Large Image Detected', style: TextStyle(color: Colors.white)),
+          content: const Text(
+            'One or more of the selected images are 15MB or larger. They will be downsized for optimal compression performance.',
+            style: TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('OK', style: TextStyle(color: Color(0xFF3B82F6))),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    if (mounted) {
+      await _navigateToResult(files, mode);
+    }
+  }
+
+  Future<void> _navigateToResult(List<XFile> files, ActionMode mode) async {
     await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => ResultScreen(
-          imageBytesList: bytesList,
-          fileNames: fileNames,
+          files: files,
           mode: mode,
           preset: mode == ActionMode.compress ? _selectedPreset : null,
         ),
