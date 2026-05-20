@@ -59,6 +59,7 @@ class _ResultScreenState extends State<ResultScreen> {
   int _currentIndex = 0;
 
   late List<bool> _processingList;
+  late List<bool> _wasDownsizedList;
   late List<Uint8List?> _resultBytesList;
   late List<Uint8List?> _residualBytesList;
   late List<Uint8List?> _inputDisplayBytesList;
@@ -80,6 +81,7 @@ class _ResultScreenState extends State<ResultScreen> {
     super.initState();
     final count = widget.files.length;
     _processingList = List.filled(count, true);
+    _wasDownsizedList = List.filled(count, false);
     _resultBytesList = List.filled(count, null);
     _residualBytesList = List.filled(count, null);
     _inputDisplayBytesList = List.filled(count, null);
@@ -132,27 +134,41 @@ class _ResultScreenState extends State<ResultScreen> {
       if (!fileName.toLowerCase().endsWith('.zip') && originalImageBytes.lengthInBytes >= 15 * 1024 * 1024) {
         bytesForProcessing = await downsizeImageIfNeeded(originalImageBytes);
         wasDownsized = true;
+        
+        try {
+          final buffer = await ui.ImmutableBuffer.fromUint8List(bytesForProcessing);
+          final descriptor = await ui.ImageDescriptor.encoded(buffer);
+          if (mounted) {
+            setState(() {
+              _originalSizeList[index] = bytesForProcessing.lengthInBytes;
+              _inputResolutionList[index] = '${descriptor.width} x ${descriptor.height}';
+              _wasDownsizedList[index] = true;
+            });
+          }
+          descriptor.dispose();
+          buffer.dispose();
+        } catch (_) {}
       }
 
-      _inputDisplayBytesList[index] = bytesForProcessing;
+      if (mounted) {
+        setState(() {
+          _inputDisplayBytesList[index] = bytesForProcessing;
+        });
+      }
 
       if (widget.mode == ActionMode.compress) {
         final quality = widget.preset?.quality ?? 80;
         result = await encodeToWebP(bytesForProcessing, quality: quality);
 
-        // Only compute residual and metrics if the image was not downsized,
-        // as they are not meaningful otherwise.
-        if (!wasDownsized) {
-          final residual = await computeResidual(originalImageBytes, result);
-          final metrics = await computeImageMetrics(originalImageBytes, result);
+        final residual = await computeResidual(bytesForProcessing, result);
+        final metrics = await computeImageMetrics(bytesForProcessing, result);
 
-          if (mounted) {
-            setState(() {
-              _residualBytesList[index] = residual;
-              _mseList[index] = metrics['mse'];
-              _ssimList[index] = metrics['ssim'];
-            });
-          }
+        if (mounted) {
+          setState(() {
+            _residualBytesList[index] = residual;
+            _mseList[index] = metrics['mse'];
+            _ssimList[index] = metrics['ssim'];
+          });
         }
       } else {
         if (fileName.toLowerCase().endsWith('.zip')) { // Decompress mode
@@ -401,6 +417,7 @@ class _ResultScreenState extends State<ResultScreen> {
             mode: widget.mode,
             preset: widget.preset,
             processing: _processingList[index],
+            wasDownsized: _wasDownsizedList[index],
             resultBytes: _resultBytesList[index],
             residualBytes: _residualBytesList[index],
             errorMsg: _errorMsgList[index],
@@ -554,6 +571,7 @@ class _ResultItemView extends StatelessWidget {
   final AppPreset? preset;
 
   final bool processing;
+  final bool wasDownsized;
   final Uint8List? resultBytes;
   final Uint8List? residualBytes;
   final String? errorMsg;
@@ -573,6 +591,7 @@ class _ResultItemView extends StatelessWidget {
     required this.mode,
     this.preset,
     required this.processing,
+    required this.wasDownsized,
     required this.resultBytes,
     required this.residualBytes,
     required this.errorMsg,
@@ -630,7 +649,6 @@ class _ResultItemView extends StatelessWidget {
     final isCompress = mode == ActionMode.compress;
     final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
     final isJustViewing = !isCompress && !isZipDecompress;
-    final wasDownsized = isCompress && mse == null && ssim == null && !processing && errorMsg == null;
 
     return SingleChildScrollView(
         padding: const EdgeInsets.all(20),
@@ -639,7 +657,7 @@ class _ResultItemView extends StatelessWidget {
           children: [
             if (!isJustViewing) ...[
               // Input File
-              const Text('Input File',
+              Text(wasDownsized ? 'Downsized Input File' : 'Input File',
                   style: TextStyle(
                       color: Colors.white,
                       fontSize: 14,
@@ -765,14 +783,11 @@ class _ResultItemView extends StatelessWidget {
                 const SizedBox(height: 4),
                 _InfoRow(label: 'Resolution', value: resultResolution!),
               ],
-              if (wasDownsized) ...[
+              if (mse != null && ssim != null) ...[
                 const SizedBox(height: 4),
-                const _InfoRow(label: 'Metrics', value: 'Skipped (Image was downsized)', valueColor: Colors.white54),
-              ] else if (mse != null && ssim != null) ...[
+                _InfoRow(label: 'MSE (vs Input)', value: mse!.toStringAsFixed(2)),
                 const SizedBox(height: 4),
-                _InfoRow(label: 'MSE (vs Original)', value: mse!.toStringAsFixed(2)),
-                const SizedBox(height: 4),
-                _InfoRow(label: 'SSIM (vs Original)', value: ssim!.toStringAsFixed(4)),
+                _InfoRow(label: 'SSIM (vs Input)', value: ssim!.toStringAsFixed(4)),
               ] else if (isZipDecompress) ...[
                 const SizedBox(height: 4),
                 const _InfoRow(label: 'Metrics', value: 'Original missing in ZIP', valueColor: Colors.white54),
