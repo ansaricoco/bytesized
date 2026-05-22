@@ -1,6 +1,7 @@
 name: bytesized
 description: Image Compression and Decompression App
 publish_to: 'none'
+
 version: 1.0.0+1
 
 environment:
@@ -9,23 +10,39 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
   # Using environment variables for keys is safer than hardcoding them.
   flutter_dotenv: ^5.1.0
   image_picker: ^1.0.7
-  file_picker: ^12.0.0-beta.1 # Updated from beta to latest stable
-  flutter_image_compress: ^2.3.0 # Updated to latest
+  file_picker: ^12.0.0-beta.1
+  flutter_image_compress: ^2.3.0
   image: ^4.2.0
-  gal: 2.3.2 # Updated to latest
-  path_provider: ^2.1.5 # Already recent
-  share_plus: ^13.1.0 # Updated to latest
-  supabase_flutter: ^2.5.3 # Updated to latest
-  archive: ^3.5.1 # Updated to latest
+  gal: 2.3.2
+  path_provider: ^2.1.5
+  share_plus: ^13.1.0
+  supabase_flutter: ^2.5.3
+  archive: ^3.5.1
   url_launcher: ^6.3.0
   app_links: ^7.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+
   flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.14.3
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+
+  image_path: "assets/app_icon.png"
+
+  adaptive_icon_background: "#ffffff"
+  adaptive_icon_foreground: "assets/app_icon.png"
+
 flutter:
   uses-material-design: true
+
+  assets:
+    - assets/app_icon.png
