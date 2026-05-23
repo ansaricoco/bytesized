@@ -5,10 +5,16 @@ import 'package:bytesized/home_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Cap Flutter's image cache to 50 MB so grid thumbnails don't accumulate
+  // and eat into the budget needed for compression work.
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 50 * 1024 * 1024;
+
   await Supabase.initialize(
     url: 'https://zkkzuknacdpinvmxlhkl.supabase.co',
-    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpra3p1a25hY2RwaW52bXhsaGtsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0OTM1ODIsImV4cCI6MjA5NDA2OTU4Mn0.YxvGNFyT-r6M7YxLRZK_ApUEZdtNOifoMFtXV_n-Wig',
+    anonKey:
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpra3p1a25hY2RwaW52bXhsaGtsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0OTM1ODIsImV4cCI6MjA5NDA2OTU4Mn0.YxvGNFyT-r6M7YxLRZK_ApUEZdtNOifoMFtXV_n-Wig',
   );
+
   runApp(const ImageCompressorApp());
 }
 

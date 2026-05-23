@@ -1,6 +1,6 @@
 import 'dart:io';
 import 'dart:ui' as ui;
- 
+
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -8,7 +8,6 @@ import 'package:gal/gal.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
-import '../app_preset.dart';
 import '../image_utils_stub.dart' if (dart.library.html) '../image_utils_web.dart';
 import 'package:bytesized/file_utils.dart';
 import 'package:bytesized/image_processing.dart';
@@ -41,13 +40,14 @@ enum ActionMode { compress, decompress }
 class ResultScreen extends StatefulWidget {
   final List<XFile> files;
   final ActionMode mode;
-  final AppPreset? preset;
+  /// Quality (1–100). Only used in compress mode.
+  final int quality;
 
   const ResultScreen({
     super.key,
     required this.files,
     required this.mode,
-    this.preset,
+    this.quality = 80,
   });
 
   @override
@@ -105,17 +105,21 @@ class _ResultScreenState extends State<ResultScreen> {
   Future<void> _fetchInputResolution(int index) async {
     try {
       final len = await widget.files[index].length();
-      if (mounted) {
-        setState(() => _originalSizeList[index] = len);
-      }
-      // Use ImageDescriptor to read metadata without decoding the full image into memory.
-      // This is critical for preventing crashes on very large images.
+      if (mounted) setState(() => _originalSizeList[index] = len);
+
+      // Skip image decoding for ZIP files — they have no image resolution
+      final fileName = widget.files[index].name.toLowerCase();
+      final bytes = await widget.files[index].readAsBytes();
+      if (fileName.endsWith('.zip') || _looksLikeZip(bytes)) return;
+
       final buffer = kIsWeb
-          ? await ui.ImmutableBuffer.fromUint8List(await widget.files[index].readAsBytes())
-          : await ui.ImmutableBuffer.fromFilePath(widget.files[index].path);
+          ? await ui.ImmutableBuffer.fromUint8List(bytes)
+          : await ui.ImmutableBuffer.fromFilePath(
+              widget.files[index].path);
       final descriptor = await ui.ImageDescriptor.encoded(buffer);
       if (mounted) {
-        setState(() => _inputResolutionList[index] = '${descriptor.width} x ${descriptor.height}');
+        setState(() => _inputResolutionList[index] =
+            '${descriptor.width} x ${descriptor.height}');
       }
       descriptor.dispose();
       buffer.dispose();
@@ -124,24 +128,24 @@ class _ResultScreenState extends State<ResultScreen> {
 
   Future<void> _process(int index) async {
     try {
-      Uint8List result;
-      final originalImageBytes = await widget.files[index].readAsBytes();
+      // ── Step 1: read bytes (single copy) ──────────────────────────────────
+      Uint8List workingBytes = await widget.files[index].readAsBytes();
       final fileName = widget.files[index].name;
+      final isZip = fileName.toLowerCase().endsWith('.zip') || _looksLikeZip(workingBytes);
 
-      Uint8List bytesForProcessing = originalImageBytes;
-      bool wasDownsized = false;
+      // ── Step 2: downsize if oversized, then release original reference ─────
+      if (!isZip && workingBytes.lengthInBytes >= 15 * 1024 * 1024) {
+        final downsized = await downsizeImageIfNeeded(workingBytes);
+        workingBytes = downsized; // old buffer eligible for GC
 
-      if (!fileName.toLowerCase().endsWith('.zip') && originalImageBytes.lengthInBytes >= 15 * 1024 * 1024) {
-        bytesForProcessing = await downsizeImageIfNeeded(originalImageBytes);
-        wasDownsized = true;
-        
         try {
-          final buffer = await ui.ImmutableBuffer.fromUint8List(bytesForProcessing);
+          final buffer = await ui.ImmutableBuffer.fromUint8List(workingBytes);
           final descriptor = await ui.ImageDescriptor.encoded(buffer);
           if (mounted) {
             setState(() {
-              _originalSizeList[index] = bytesForProcessing.lengthInBytes;
-              _inputResolutionList[index] = '${descriptor.width} x ${descriptor.height}';
+              _originalSizeList[index] = workingBytes.lengthInBytes;
+              _inputResolutionList[index] =
+                  '${descriptor.width} x ${descriptor.height}';
               _wasDownsizedList[index] = true;
             });
           }
@@ -150,18 +154,28 @@ class _ResultScreenState extends State<ResultScreen> {
         } catch (_) {}
       }
 
-      if (mounted) {
-        setState(() {
-          _inputDisplayBytesList[index] = bytesForProcessing;
-        });
+      // Update display with (possibly downsized) input
+      if (mounted && !isZip) {
+        setState(() => _inputDisplayBytesList[index] = workingBytes);
       }
 
-      if (widget.mode == ActionMode.compress) {
-        final quality = widget.preset?.quality ?? 80;
-        result = await encodeToWebP(bytesForProcessing, quality: quality);
+      Uint8List result;
 
-        final residual = await computeResidual(bytesForProcessing, result);
-        final metrics = await computeImageMetrics(bytesForProcessing, result);
+      if (widget.mode == ActionMode.compress) {
+        // ── Single isolate: compress + residual in one shot ──────────────────
+        final output = await compressAndComputeResidual(
+          workingBytes,
+          quality: widget.quality,
+        );
+
+        result = output['lossy']!;
+        final residual = output['residual']!;
+
+        // Release the large input buffer before metrics computation
+        final metricsRef = workingBytes;
+        workingBytes = Uint8List(0); // hint GC
+
+        final metrics = await computeImageMetrics(metricsRef, result);
 
         if (mounted) {
           setState(() {
@@ -171,41 +185,14 @@ class _ResultScreenState extends State<ResultScreen> {
           });
         }
       } else {
-        if (fileName.toLowerCase().endsWith('.zip')) { // Decompress mode
-          final archive = await compute(_decodeZipTask, originalImageBytes);
-          ArchiveFile? lossyFile;
-          ArchiveFile? residualFile;
-          ArchiveFile? originalFile;
-
-          for (final file in archive) {
-            if (file.name == 'image.webp') lossyFile = file;
-            if (file.name == 'residual.png') residualFile = file;
-            if (file.name == 'original_image') originalFile = file;
-          }
-
-          if (lossyFile != null && residualFile != null) {
-            final lossyBytes = Uint8List.fromList(lossyFile.content as List<int>);
-            final resBytes = Uint8List.fromList(residualFile.content as List<int>);
-            result = await reconstructFromResidual(lossyBytes, resBytes);
-            
-            if (originalFile != null) {
-              final origBytes = Uint8List.fromList(originalFile.content as List<int>);
-              final metrics = await computeImageMetrics(origBytes, result);
-              if (mounted) setState(() { _mseList[index] = metrics['mse']; _ssimList[index] = metrics['ssim']; });
-            }
-          } else if (lossyFile != null) {
-            result = Uint8List.fromList(lossyFile.content as List<int>);
-          } else {
-            throw Exception('Invalid ZIP format: missing image.webp');
-          }
-        } else {
-          result = originalImageBytes;
-        }
+        // ── Decompress path ──────────────────────────────────────────────────
+        result = await _decompressFile(index, workingBytes);
+        workingBytes = Uint8List(0); // release after use
       }
 
+      // ── Resolution of result ──────────────────────────────────────────────
       String? resResolution;
       try {
-        // Use ImageDescriptor for memory-safe resolution checking of the result.
         final buffer = await ui.ImmutableBuffer.fromUint8List(result);
         final descriptor = await ui.ImageDescriptor.encoded(buffer);
         resResolution = '${descriptor.width} x ${descriptor.height}';
@@ -230,6 +217,81 @@ class _ResultScreenState extends State<ResultScreen> {
     }
   }
 
+  /// Checks the ZIP magic bytes (PK header) regardless of filename.
+  bool _looksLikeZip(Uint8List bytes) {
+    return bytes.length > 4 &&
+        bytes[0] == 0x50 &&
+        bytes[1] == 0x4B &&
+        bytes[2] == 0x03 &&
+        bytes[3] == 0x04;
+  }
+
+  /// Handles ZIP decompression. Scoped separately to keep [_process] readable.
+  Future<Uint8List> _decompressFile(int index, Uint8List bytes) async {
+    final fileName = widget.files[index].name.toLowerCase();
+
+    // Return as-is if it's not a ZIP by name or magic bytes
+    if (!fileName.endsWith('.zip') && !_looksLikeZip(bytes)) return bytes;
+
+    Archive archive;
+    try {
+      archive = await compute(_decodeZipTask, bytes);
+    } catch (e) {
+      throw Exception('Could not open ZIP: $e');
+    }
+
+    ArchiveFile? lossyFile, residualFile, originalFile;
+
+    for (final file in archive) {
+      if (file.isFile) {
+        final n = file.name.toLowerCase();
+        if (n == 'image.webp') lossyFile = file;
+        if (n == 'residual.png') residualFile = file;
+        if (n == 'original_image') originalFile = file;
+      }
+    }
+
+    // No image.webp found — may be a master ZIP wrapping inner files.
+    // Extract and return the first usable image file found.
+    if (lossyFile == null) {
+      for (final file in archive) {
+        if (file.isFile) {
+          final n = file.name.toLowerCase();
+          final isImage = n.endsWith('.webp') ||
+              n.endsWith('.jpg') ||
+              n.endsWith('.jpeg') ||
+              n.endsWith('.png');
+          if (isImage) {
+            return Uint8List.fromList(file.content as List<int>);
+          }
+        }
+      }
+      throw Exception('No supported image found in ZIP.');
+    }
+
+    final lossyBytes = Uint8List.fromList(lossyFile.content as List<int>);
+    if (residualFile == null) return lossyBytes;
+
+    final resBytes = Uint8List.fromList(residualFile.content as List<int>);
+    final result = await reconstructFromResidual(lossyBytes, resBytes);
+
+    if (originalFile != null && mounted) {
+      final origBytes =
+          Uint8List.fromList(originalFile.content as List<int>);
+      final metrics = await computeImageMetrics(origBytes, result);
+      if (mounted) {
+        setState(() {
+          _mseList[index] = metrics['mse'];
+          _ssimList[index] = metrics['ssim'];
+        });
+      }
+    }
+
+    return result;
+  }
+
+  // ── Save helpers ────────────────────────────────────────────────────────────
+
   Future<void> _save(int index) async {
     final result = _resultBytesList[index];
     if (result == null) return;
@@ -242,28 +304,32 @@ class _ResultScreenState extends State<ResultScreen> {
         processingText: 'Saving image...',
         saveTask: () async {
           final isCompress = widget.mode == ActionMode.compress;
-        final fileName = widget.files[index].name;
-          final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
+          final fileName = widget.files[index].name;
+          final isZipDecompress =
+              !isCompress && (fileName.toLowerCase().endsWith('.zip') ||
+              _looksLikeZip(await widget.files[index].readAsBytes()));
 
-          final ext = isCompress 
-              ? '.webp' 
+          final ext = isCompress
+              ? '.webp'
               : (isZipDecompress ? '.jpg' : '.${fileName.split('.').last}');
-          final prefix = isCompress ? 'compressed' : (isZipDecompress ? 'reconstructed' : 'downloaded');
-          final outName = '${prefix}_${DateTime.now().millisecondsSinceEpoch}$ext';
-          
+          final prefix = isCompress
+              ? 'compressed'
+              : (isZipDecompress ? 'reconstructed' : 'downloaded');
+          final outName =
+              '${prefix}_${DateTime.now().millisecondsSinceEpoch}$ext';
+
           if (kIsWeb) {
             downloadBytes(result, outName);
             return 'Image download started.';
           } else {
             final saveDir = await getAppSaveDirectory();
-            final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+            final dirPath =
+                saveDir?.path ?? (await getTemporaryDirectory()).path;
             final file = File('$dirPath/$outName');
             await file.writeAsBytes(result);
-            
             try {
               await Gal.putImage(file.path);
             } catch (_) {}
-            
             return 'Image saved successfully!';
           }
         },
@@ -279,18 +345,23 @@ class _ResultScreenState extends State<ResultScreen> {
         title: 'Saved!',
         processingText: 'Saving ZIP archive...',
         saveTask: () async {
-          if (widget.mode == ActionMode.decompress && widget.files[index].name.toLowerCase().endsWith('.zip')) {
-            final zipBytes = await widget.files[index].readAsBytes();
-            final outName = 'downloaded_archive_${DateTime.now().millisecondsSinceEpoch}.zip';
+          final fileName = widget.files[index].name;
+          final rawBytes = await widget.files[index].readAsBytes();
+          final isIncomingZip = !widget.mode.name.contains('compress') &&
+              (fileName.toLowerCase().endsWith('.zip') || _looksLikeZip(rawBytes));
 
+          if (isIncomingZip) {
+            final outName =
+                'downloaded_archive_${DateTime.now().millisecondsSinceEpoch}.zip';
             if (kIsWeb) {
-              downloadBytes(zipBytes, outName);
+              downloadBytes(rawBytes, outName);
               return 'ZIP download started.';
             } else {
               final saveDir = await getAppSaveDirectory();
-              final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+              final dirPath =
+                  saveDir?.path ?? (await getTemporaryDirectory()).path;
               final file = File('$dirPath/$outName');
-              await file.writeAsBytes(zipBytes);
+              await file.writeAsBytes(rawBytes);
               return 'ZIP saved to Downloads folder!';
             }
           }
@@ -300,28 +371,29 @@ class _ResultScreenState extends State<ResultScreen> {
           if (resultBytes == null || residualBytes == null) {
             throw Exception('Processing not finished yet.');
           }
-          
+
           final zipBytesNullable = await compute(_encodeZipTask, {
             'result': resultBytes,
             'residual': residualBytes,
             'original': await widget.files[index].readAsBytes(),
           });
-          
+
           if (zipBytesNullable == null) {
             throw Exception('Failed to encode ZIP archive.');
           }
-          final zipBytes = zipBytesNullable;
 
-          final outName = 'compressed_with_residual_${DateTime.now().millisecondsSinceEpoch}.zip';
+          final outName =
+              'compressed_with_residual_${DateTime.now().millisecondsSinceEpoch}.zip';
 
           if (kIsWeb) {
-            downloadBytes(Uint8List.fromList(zipBytes), outName);
+            downloadBytes(Uint8List.fromList(zipBytesNullable), outName);
             return 'ZIP download started.';
           } else {
             final saveDir = await getAppSaveDirectory();
-            final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+            final dirPath =
+                saveDir?.path ?? (await getTemporaryDirectory()).path;
             final file = File('$dirPath/$outName');
-            await file.writeAsBytes(zipBytes);
+            await file.writeAsBytes(zipBytesNullable);
             return 'ZIP saved to Downloads folder!';
           }
         },
@@ -331,10 +403,11 @@ class _ResultScreenState extends State<ResultScreen> {
 
   Future<void> _saveAll() async {
     if (_processingList.any((p) => p)) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please wait for all images to finish processing.')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Please wait for all images to finish processing.')));
       return;
     }
-    
+
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -349,28 +422,37 @@ class _ResultScreenState extends State<ResultScreen> {
 
             final isCompress = widget.mode == ActionMode.compress;
             final fileName = widget.files[i].name;
-            final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
+            final isZipDecompress =
+                !isCompress && fileName.toLowerCase().endsWith('.zip');
 
-            final ext = isCompress 
-                ? '.webp' 
+            final ext = isCompress
+                ? '.webp'
                 : (isZipDecompress ? '.jpg' : '.${fileName.split('.').last}');
-            final prefix = isCompress ? 'compressed' : (isZipDecompress ? 'reconstructed' : 'downloaded');
-            final outName = '${prefix}_${DateTime.now().millisecondsSinceEpoch}_$i$ext';
-            
+            final prefix = isCompress
+                ? 'compressed'
+                : (isZipDecompress ? 'reconstructed' : 'downloaded');
+            final outName =
+                '${prefix}_${DateTime.now().millisecondsSinceEpoch}_${i}$ext';
+
             if (kIsWeb) {
               downloadBytes(result, outName);
             } else {
               final saveDir = await getAppSaveDirectory();
-              final dirPath = saveDir?.path ?? (await getTemporaryDirectory()).path;
+              final dirPath =
+                  saveDir?.path ?? (await getTemporaryDirectory()).path;
               final file = File('$dirPath/$outName');
               await file.writeAsBytes(result);
-              try { await Gal.putImage(file.path); } catch (_) {}
+              try {
+                await Gal.putImage(file.path);
+              } catch (_) {}
             }
             savedCount++;
           }
-          
+
           if (savedCount == 0) throw Exception('No images to save.');
-          return kIsWeb ? 'Started downloading $savedCount images!' : 'Saved $savedCount images successfully!';
+          return kIsWeb
+              ? 'Started downloading $savedCount images!'
+              : 'Saved $savedCount images successfully!';
         },
       ),
     );
@@ -380,8 +462,10 @@ class _ResultScreenState extends State<ResultScreen> {
   Widget build(BuildContext context) {
     final isCompress = widget.mode == ActionMode.compress;
     final hasMultiple = widget.files.length > 1;
-    final currentFileName = widget.files.isNotEmpty ? widget.files[_currentIndex].name : '';
-    final isZipDecompress = !isCompress && currentFileName.toLowerCase().endsWith('.zip');
+    final currentFileName =
+        widget.files.isNotEmpty ? widget.files[_currentIndex].name : '';
+    final isZipDecompress =
+        !isCompress && currentFileName.toLowerCase().endsWith('.zip');
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
@@ -389,9 +473,13 @@ class _ResultScreenState extends State<ResultScreen> {
         backgroundColor: const Color(0xFF0A0A0A),
         foregroundColor: Colors.white,
         title: Text(
-          hasMultiple 
+          hasMultiple
               ? '${isCompress ? 'Compress' : (isZipDecompress ? 'Decompress' : 'View')} (${_currentIndex + 1}/${widget.files.length})'
-              : (isCompress ? 'Compress to WebP' : (isZipDecompress ? 'Reconstructed (Lossy + Residual)' : 'Downloaded Image')),
+              : (isCompress
+                  ? 'Compress to WebP'
+                  : (isZipDecompress
+                      ? 'Reconstructed (Lossy + Residual)'
+                      : 'Downloaded Image')),
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
         elevation: 0,
@@ -415,7 +503,7 @@ class _ResultScreenState extends State<ResultScreen> {
             inputBytesForDisplay: _inputDisplayBytesList[index],
             originalSize: _originalSizeList[index],
             mode: widget.mode,
-            preset: widget.preset,
+            quality: widget.quality,
             processing: _processingList[index],
             wasDownsized: _wasDownsizedList[index],
             resultBytes: _resultBytesList[index],
@@ -435,8 +523,7 @@ class _ResultScreenState extends State<ResultScreen> {
 }
 
 // ─────────────────────────────────────────────
-// REAL-TIME SAVE DIALOG POPUP 
-// (Edit this to change the UI of the download pop-ups)
+// SAVE DIALOG
 // ─────────────────────────────────────────────
 class SaveDialog extends StatefulWidget {
   final Future<String> Function() saveTask;
@@ -468,19 +555,9 @@ class _SaveDialogState extends State<SaveDialog> {
   Future<void> _runTask() async {
     try {
       final resultMessage = await widget.saveTask();
-      if (mounted) {
-        setState(() {
-          _step = 'success';
-          _message = resultMessage;
-        });
-      }
+      if (mounted) setState(() { _step = 'success'; _message = resultMessage; });
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _step = 'error';
-          _message = e.toString();
-        });
-      }
+      if (mounted) setState(() { _step = 'error'; _message = e.toString(); });
     }
   }
 
@@ -495,7 +572,9 @@ class _SaveDialogState extends State<SaveDialog> {
           const SizedBox(height: 16),
           const CircularProgressIndicator(color: Color(0xFF3B82F6)),
           const SizedBox(height: 24),
-          Text(_message, style: const TextStyle(color: Colors.white, fontSize: 16), textAlign: TextAlign.center),
+          Text(_message,
+              style: const TextStyle(color: Colors.white, fontSize: 16),
+              textAlign: TextAlign.center),
           const SizedBox(height: 16),
         ],
       );
@@ -503,11 +582,18 @@ class _SaveDialogState extends State<SaveDialog> {
       content = Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.check_circle_outline_rounded, color: Color(0xFF22C55E), size: 48),
+          const Icon(Icons.check_circle_outline_rounded,
+              color: Color(0xFF22C55E), size: 48),
           const SizedBox(height: 16),
-          Text(widget.title, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+          Text(widget.title,
+              style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white)),
           const SizedBox(height: 16),
-          Text(_message, style: const TextStyle(color: Colors.white70, fontSize: 14), textAlign: TextAlign.center),
+          Text(_message,
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
+              textAlign: TextAlign.center),
           const SizedBox(height: 24),
           SizedBox(
             width: double.infinity,
@@ -516,22 +602,32 @@ class _SaveDialogState extends State<SaveDialog> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF3B82F6),
                 padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
               ),
-              child: const Text('Done', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+              child: const Text('Done',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w600)),
             ),
-          )
+          ),
         ],
       );
     } else {
       content = Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 48),
+          const Icon(Icons.error_outline_rounded,
+              color: Colors.redAccent, size: 48),
           const SizedBox(height: 16),
-          const Text('Error', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+          const Text('Error',
+              style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white)),
           const SizedBox(height: 16),
-          Text(_message, style: const TextStyle(color: Colors.white70), textAlign: TextAlign.center),
+          Text(_message,
+              style: const TextStyle(color: Colors.white70),
+              textAlign: TextAlign.center),
           const SizedBox(height: 24),
           SizedBox(
             width: double.infinity,
@@ -540,11 +636,14 @@ class _SaveDialogState extends State<SaveDialog> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF222222),
                 padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
               ),
-              child: const Text('Close', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+              child: const Text('Close',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w600)),
             ),
-          )
+          ),
         ],
       );
     }
@@ -563,12 +662,15 @@ class _SaveDialogState extends State<SaveDialog> {
   }
 }
 
+// ─────────────────────────────────────────────
+// RESULT ITEM VIEW
+// ─────────────────────────────────────────────
 class _ResultItemView extends StatelessWidget {
   final XFile file;
   final Uint8List? inputBytesForDisplay;
   final int? originalSize;
   final ActionMode mode;
-  final AppPreset? preset;
+  final int quality;
 
   final bool processing;
   final bool wasDownsized;
@@ -589,7 +691,7 @@ class _ResultItemView extends StatelessWidget {
     this.inputBytesForDisplay,
     required this.originalSize,
     required this.mode,
-    this.preset,
+    required this.quality,
     required this.processing,
     required this.wasDownsized,
     required this.resultBytes,
@@ -618,7 +720,6 @@ class _ResultItemView extends StatelessWidget {
   }
 
   Widget _buildInputImage() {
-    // If the downsized (or original) bytes are ready for display, show them.
     if (inputBytesForDisplay != null) {
       return Image.memory(
         inputBytesForDisplay!,
@@ -627,17 +728,17 @@ class _ResultItemView extends StatelessWidget {
       );
     }
 
-    // IMPORTANT: For large images, show a loader instead of Image.file() to prevent crashes.
-    // The view will update with the downsized image once processing provides the bytes.
     if ((originalSize ?? 0) >= 15 * 1024 * 1024 && !kIsWeb) {
       return Container(
         height: 200,
-        decoration: BoxDecoration(color: const Color(0xFF1A1A1A), borderRadius: BorderRadius.circular(10)),
-        child: const Center(child: CircularProgressIndicator(color: Color(0xFF3B82F6))),
+        decoration: BoxDecoration(
+            color: const Color(0xFF1A1A1A),
+            borderRadius: BorderRadius.circular(10)),
+        child: const Center(
+            child: CircularProgressIndicator(color: Color(0xFF3B82F6))),
       );
     }
 
-    // For small images or web, render directly from the file path.
     return kIsWeb
         ? Image.network(file.path, width: double.infinity, fit: BoxFit.contain)
         : Image.file(File(file.path), width: double.infinity, fit: BoxFit.contain);
@@ -647,171 +748,231 @@ class _ResultItemView extends StatelessWidget {
   Widget build(BuildContext context) {
     final fileName = file.name;
     final isCompress = mode == ActionMode.compress;
-    final isZipDecompress = !isCompress && fileName.toLowerCase().endsWith('.zip');
+    final isZipDecompress =
+        !isCompress && fileName.toLowerCase().endsWith('.zip');
     final isJustViewing = !isCompress && !isZipDecompress;
 
     return SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!isJustViewing) ...[
-              // Input File
-              Text(wasDownsized ? 'Downsized Input File' : 'Input File',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600)),
-              const SizedBox(height: 8),
-              if (fileName.toLowerCase().endsWith('.zip'))
-                Container(
-                  width: double.infinity,
-                  height: 200,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1A1A1A),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.folder_zip_rounded, size: 64, color: Color(0xFF818CF8)),
-                      SizedBox(height: 12),
-                      Text('ZIP Archive metadata', style: TextStyle(color: Colors.white70)),
-                    ],
-                  ),
-                )
-              else
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10), child: _buildInputImage(),
-                ),
-              const SizedBox(height: 8),
-              _InfoRow(
-                  label: 'Format',
-                  value: fileName.split('.').last.toUpperCase()),
-              const SizedBox(height: 4),
-            _InfoRow(
-                label: 'Size', value: originalSize != null ? _formatSize(originalSize!) : 'Calculating...'),
-              if (inputResolution != null) ...[
-                const SizedBox(height: 4),
-                _InfoRow(label: 'Resolution', value: inputResolution!),
-              ],
-
-              const SizedBox(height: 24),
-              const Divider(color: Color(0xFF2A2A2A)),
-              const SizedBox(height: 24),
-            ],
-
-            // Result
-            Row(
-              children: [
-                Text(isCompress ? 'WebP Output' : (isZipDecompress ? 'Reconstructed Output' : 'Downloaded Image'),
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600)),
-                const SizedBox(width: 8),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF3B82F6).withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                        color: const Color(0xFF3B82F6).withOpacity(0.4)),
-                  ),
-                  child: Text(isCompress ? 'WEBP' : (isZipDecompress ? 'JPG' : fileName.split('.').last.toUpperCase()),
-                      style: const TextStyle(
-                          color: Color(0xFF3B82F6),
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700)),
-                ),
-              ],
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!isJustViewing) ...[
+            Text(
+              wasDownsized ? 'Downsized Input File' : 'Input File',
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 8),
-
-            if (processing)
+            if (fileName.toLowerCase().endsWith('.zip'))
               Container(
+                width: double.infinity,
                 height: 200,
                 decoration: BoxDecoration(
                   color: const Color(0xFF1A1A1A),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const CircularProgressIndicator(
-                          color: Color(0xFF3B82F6), strokeWidth: 2),
-                      const SizedBox(height: 12),
-                      Text(isCompress ? 'Converting to WebP...' : 'Processing image...',
-                          style: const TextStyle(
-                              color: Colors.white54, fontSize: 13)),
-                    ],
-                  ),
+                child: const Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.folder_zip_rounded,
+                        size: 64, color: Color(0xFF818CF8)),
+                    SizedBox(height: 12),
+                    Text('ZIP Archive',
+                        style: TextStyle(color: Colors.white70)),
+                  ],
                 ),
               )
-            else if (errorMsg != null)
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.red.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.red.withOpacity(0.3)),
-                ),
-                child: Text(errorMsg!,
-                    style: const TextStyle(
-                        color: Colors.redAccent, fontSize: 13)),
-              )
-            else if (resultBytes != null) ...[
+            else
               ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 400),
-                  child: Image.memory(
-                    resultBytes!,
-                    width: double.infinity,
-                    fit: BoxFit.contain,
-                  ),
+                  borderRadius: BorderRadius.circular(10),
+                  child: _buildInputImage()),
+            const SizedBox(height: 8),
+            _InfoRow(
+                label: 'Format',
+                value: fileName.split('.').last.toUpperCase()),
+            const SizedBox(height: 4),
+            _InfoRow(
+                label: 'Size',
+                value: originalSize != null
+                    ? _formatSize(originalSize!)
+                    : 'Calculating...'),
+            if (inputResolution != null) ...[
+              const SizedBox(height: 4),
+              _InfoRow(label: 'Resolution', value: inputResolution!),
+            ],
+            if (isCompress) ...[
+              const SizedBox(height: 4),
+              _InfoRow(label: 'Quality', value: '$quality / 100'),
+            ],
+            const SizedBox(height: 24),
+            const Divider(color: Color(0xFF2A2A2A)),
+            const SizedBox(height: 24),
+          ],
+
+          // ── Result ──────────────────────────────────────────────────────
+          Row(
+            children: [
+              Text(
+                isCompress
+                    ? 'WebP Output'
+                    : (isZipDecompress
+                        ? 'Reconstructed Output'
+                        : 'Downloaded Image'),
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF3B82F6).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                      color: const Color(0xFF3B82F6).withOpacity(0.4)),
+                ),
+                child: Text(
+                  isCompress
+                      ? 'WEBP'
+                      : (isZipDecompress
+                          ? 'JPG'
+                          : fileName.split('.').last.toUpperCase()),
+                  style: const TextStyle(
+                      color: Color(0xFF3B82F6),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700),
                 ),
               ),
-              const SizedBox(height: 8),
-              _InfoRow(label: 'Format', value: isCompress ? 'WEBP' : (isZipDecompress ? 'JPG' : fileName.split('.').last.toUpperCase())),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          if (processing)
+            Container(
+              height: 200,
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1A),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(
+                        color: Color(0xFF3B82F6), strokeWidth: 2),
+                    const SizedBox(height: 12),
+                    Text(
+                      isCompress
+                          ? 'Converting to WebP...'
+                          : 'Processing image...',
+                      style: const TextStyle(
+                          color: Colors.white54, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else if (errorMsg != null)
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.red.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.red.withOpacity(0.3)),
+              ),
+              child: Text(errorMsg!,
+                  style: const TextStyle(
+                      color: Colors.redAccent, fontSize: 13)),
+            )
+          else if (resultBytes != null) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 400),
+                child: Image.memory(
+                  resultBytes!,
+                  width: double.infinity,
+                  fit: BoxFit.contain,
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            _InfoRow(
+                label: 'Format',
+                value: isCompress
+                    ? 'WEBP'
+                    : (isZipDecompress
+                        ? 'JPG'
+                        : fileName.split('.').last.toUpperCase())),
+            const SizedBox(height: 4),
+            _InfoRow(label: 'Size', value: _formatSize(_resultSize)),
+            if (resultResolution != null) ...[
+              const SizedBox(height: 4),
+              _InfoRow(label: 'Resolution', value: resultResolution!),
+            ],
+            if (mse != null && ssim != null) ...[
               const SizedBox(height: 4),
               _InfoRow(
-                  label: 'Size', value: _formatSize(_resultSize)),
-              if (resultResolution != null) ...[
-                const SizedBox(height: 4),
-                _InfoRow(label: 'Resolution', value: resultResolution!),
-              ],
-              if (mse != null && ssim != null) ...[
-                const SizedBox(height: 4),
-                _InfoRow(label: 'MSE (vs Input)', value: mse!.toStringAsFixed(2)),
-                const SizedBox(height: 4),
-                _InfoRow(label: 'SSIM (vs Input)', value: ssim!.toStringAsFixed(4)),
-              ] else if (isZipDecompress) ...[
-                const SizedBox(height: 4),
-                const _InfoRow(label: 'Metrics', value: 'Original missing in ZIP', valueColor: Colors.white54),
-              ],
-              if (isCompress || isZipDecompress) ...[
-                const SizedBox(height: 4),
-                _InfoRow(
-                  label: 'Size Reduction',
-                  value:
-                      '${_savingsPercent > 0 ? '-' : '+'}${_savingsPercent.abs().toStringAsFixed(1)}%',
-                  valueColor: _savingsPercent > 0
-                      ? const Color(0xFF22C55E)
-                      : Colors.orangeAccent,
+                  label: 'MSE (vs Input)',
+                  value: mse!.toStringAsFixed(2)),
+              const SizedBox(height: 4),
+              _InfoRow(
+                  label: 'SSIM (vs Input)',
+                  value: ssim!.toStringAsFixed(4)),
+            ] else if (isZipDecompress) ...[
+              const SizedBox(height: 4),
+              const _InfoRow(
+                  label: 'Metrics',
+                  value: 'Original missing in ZIP',
+                  valueColor: Colors.white54),
+            ],
+            if (isCompress || isZipDecompress) ...[
+              const SizedBox(height: 4),
+              _InfoRow(
+                label: 'Size Reduction',
+                value:
+                    '${_savingsPercent > 0 ? '-' : '+'}${_savingsPercent.abs().toStringAsFixed(1)}%',
+                valueColor: _savingsPercent > 0
+                    ? const Color(0xFF22C55E)
+                    : Colors.orangeAccent,
+              ),
+            ],
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: onSave,
+                icon: const Icon(Icons.download_rounded, size: 18),
+                label: Text(isCompress ? 'Download WebP' : 'Download Image'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF353535),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  elevation: 0,
+                  textStyle: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600),
                 ),
-              ],
-              const SizedBox(height: 20),
+              ),
+            ),
+            const SizedBox(height: 12),
+            if ((isCompress && residualBytes != null) || isZipDecompress) ...[
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
-                  onPressed: onSave,
-                  icon: const Icon(Icons.download_rounded, size: 18),
-                  label: Text(isCompress ? 'Download WebP' : 'Download Image'),
+                  onPressed: onSaveZip,
+                  icon: const Icon(Icons.archive_rounded, size: 18),
+                  label: Text(isCompress
+                      ? 'Download ZIP (WebP + Residual)'
+                      : 'Download Original ZIP'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color.fromARGB(255, 53, 53, 53),
+                    backgroundColor: const Color(0xFF353535),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(
@@ -819,52 +980,33 @@ class _ResultItemView extends StatelessWidget {
                     elevation: 0,
                     textStyle: const TextStyle(
                         fontSize: 15, fontWeight: FontWeight.w600),
-                      ),
-                    ),
                   ),
-                  const SizedBox(height: 12),
-                  if ((isCompress && residualBytes != null) || isZipDecompress) ...[
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: onSaveZip,
-                        icon: const Icon(Icons.archive_rounded, size: 18),
-                        label: Text(isCompress ? 'Download ZIP (WebP + Residual)' : 'Download Original ZIP'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color.fromARGB(255, 53, 53, 53),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8)),
-                          elevation: 0,
-                          textStyle: const TextStyle(
-                              fontSize: 15, fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: () => Navigator.of(context).popUntil((route) => route.isFirst),
-                      icon: const Icon(Icons.refresh_rounded, size: 18),
-                      label: const Text('New Image'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color.fromARGB(255, 53, 53, 53),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8)),
-                        elevation: 0,
-                        textStyle: const TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
             ],
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () =>
+                    Navigator.of(context).popUntil((route) => route.isFirst),
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('New Image'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF353535),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  elevation: 0,
+                  textStyle: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
           ],
-        )
+        ],
+      ),
     );
   }
 }
