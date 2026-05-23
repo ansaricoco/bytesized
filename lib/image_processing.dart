@@ -5,22 +5,43 @@ import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:image/image.dart' as img;
 
 // ─────────────────────────────────────────────
+// LIMITS
+// A decoded RGBA pixel buffer costs width × height × 4 bytes.
+// Peak RAM during compress+residual is ~3× the decoded size.
+// These limits keep peak usage under ~450 MB on largeHeap Android.
+// ─────────────────────────────────────────────
+
+/// Maximum input file size we accept without forcing a downsize (40 MB).
+const int kMaxInputBytes = 40 * 1024 * 1024;
+
+/// Maximum pixel count before we must downsize (8000 × 8000 = 64 MP).
+/// Decoded RGBA at this size = ~256 MB; peak ~450 MB with residual.
+const int kMaxPixels = 8000 * 8000;
+
+/// The long-edge cap we downsize TO when the image exceeds [kMaxPixels].
+/// 5120 px long edge ≈ 26 MP — still very high quality.
+const int kDownsizeLongEdge = 5120;
+
+// ─────────────────────────────────────────────
 // WEBP / JPEG COMPRESSION
 // ─────────────────────────────────────────────
 
-/// Encodes [inputBytes] to WebP (mobile) or JPEG (web) at the given [quality].
-Future<Uint8List> encodeToWebP(Uint8List inputBytes, {int quality = 80}) async {
+/// Encodes [inputBytes] to WebP (mobile) or JPEG (web) at [quality].
+Future<Uint8List> encodeToWebP(Uint8List inputBytes,
+    {int quality = 80}) async {
   if (kIsWeb) {
-    return compute(_encodeFallbackTask, {'bytes': inputBytes, 'quality': quality});
+    return compute(
+        _encodeFallbackTask, {'bytes': inputBytes, 'quality': quality});
   }
-  final result = await FlutterImageCompress.compressWithList(
+  return FlutterImageCompress.compressWithList(
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
-    minWidth: 4096,
-    minHeight: 4096,
+    // Setting both to a very large number tells the codec NOT to resize —
+    // it only downsizes when the image exceeds these dimensions.
+    minWidth: 16000,
+    minHeight: 16000,
   );
-  return result;
 }
 
 Uint8List _encodeFallbackTask(Map<String, dynamic> data) {
@@ -33,8 +54,6 @@ Uint8List _encodeFallbackTask(Map<String, dynamic> data) {
 
 // ─────────────────────────────────────────────
 // SINGLE-ISOLATE COMPRESS + RESIDUAL
-// Runs compression AND residual computation in one isolate call so the large
-// decoded pixel buffers never cross the isolate boundary twice.
 // ─────────────────────────────────────────────
 
 /// Compresses [inputBytes] and computes the residual in a single isolate pass.
@@ -44,21 +63,20 @@ Future<Map<String, Uint8List>> compressAndComputeResidual(
   int quality = 80,
 }) async {
   if (kIsWeb) {
-    // Web cannot use FlutterImageCompress — do everything in pure Dart.
     return compute(
       _compressAndResidualPureDartTask,
       {'bytes': inputBytes, 'quality': quality},
     );
   }
 
-  // Mobile: compress via native codec first (fast, memory-efficient),
-  // then compute residual in isolate.
+  // Mobile: native WebP encode (memory-efficient OS codec),
+  // then residual in isolate.
   final lossyBytes = await FlutterImageCompress.compressWithList(
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
-    minWidth: 4096,
-    minHeight: 4096,
+    minWidth: 16000,
+    minHeight: 16000,
   );
 
   final residualBytes = await compute(
@@ -69,28 +87,25 @@ Future<Map<String, Uint8List>> compressAndComputeResidual(
   return {'lossy': lossyBytes, 'residual': residualBytes};
 }
 
-/// Pure-Dart path used on web (no native codec available).
 Map<String, Uint8List> _compressAndResidualPureDartTask(
     Map<String, dynamic> data) {
   final Uint8List inputBytes = data['bytes'];
   final int quality = data['quality'];
 
-  // 1. Decode once.
   final original = img.decodeImage(inputBytes);
   if (original == null) throw Exception('Could not decode image');
 
-  // 2. Encode to JPEG (quality-respecting fallback for web).
-  final lossyBytes = Uint8List.fromList(img.encodeJpg(original, quality: quality));
+  final lossyBytes =
+      Uint8List.fromList(img.encodeJpg(original, quality: quality));
 
-  // 3. Decode lossy copy and resize to match if needed.
   var lossyImg = img.decodeImage(lossyBytes);
   if (lossyImg == null) throw Exception('Could not decode lossy image');
-  if (lossyImg.width != original.width || lossyImg.height != original.height) {
-    lossyImg =
-        img.copyResize(lossyImg, width: original.width, height: original.height);
+  if (lossyImg.width != original.width ||
+      lossyImg.height != original.height) {
+    lossyImg = img.copyResize(lossyImg,
+        width: original.width, height: original.height);
   }
 
-  // 4. Compute residual IN-PLACE on original to avoid a third full-image allocation.
   final origIter = original.iterator;
   final lossyIter = lossyImg.iterator;
   while (origIter.moveNext() && lossyIter.moveNext()) {
@@ -107,7 +122,7 @@ Map<String, Uint8List> _compressAndResidualPureDartTask(
 }
 
 // ─────────────────────────────────────────────
-// RESIDUAL COMPUTATION (mobile, separate call)
+// RESIDUAL (mobile separate call)
 // ─────────────────────────────────────────────
 
 Uint8List _computeResidualTask(Map<String, Uint8List> data) {
@@ -117,11 +132,13 @@ Uint8List _computeResidualTask(Map<String, Uint8List> data) {
   final origImg = img.decodeImage(originalBytes);
   var lossyImg = img.decodeImage(lossyBytes);
 
-  if (origImg == null || lossyImg == null) throw Exception('Process failed!');
+  if (origImg == null || lossyImg == null)
+    throw Exception('Process failed!');
 
-  if (origImg.width != lossyImg.width || origImg.height != lossyImg.height) {
-    lossyImg =
-        img.copyResize(lossyImg, width: origImg.width, height: origImg.height);
+  if (origImg.width != lossyImg.width ||
+      origImg.height != lossyImg.height) {
+    lossyImg = img.copyResize(lossyImg,
+        width: origImg.width, height: origImg.height);
   }
 
   final origIter = origImg.iterator;
@@ -144,7 +161,8 @@ Uint8List _computeResidualTask(Map<String, Uint8List> data) {
 
 Future<Uint8List> reconstructFromResidual(
     Uint8List lossyBytes, Uint8List residualBytes) async {
-  return compute(_reconstructTask, {'lossy': lossyBytes, 'residual': residualBytes});
+  return compute(
+      _reconstructTask, {'lossy': lossyBytes, 'residual': residualBytes});
 }
 
 Uint8List _reconstructTask(Map<String, Uint8List> data) {
@@ -163,7 +181,6 @@ Uint8List _reconstructTask(Map<String, Uint8List> data) {
         width: residualImg.width, height: residualImg.height);
   }
 
-  // IN-PLACE on residualImg — saves ~250 MB on 4K images.
   final lossyIter = lossyImg.iterator;
   final resIter = residualImg.iterator;
   while (lossyIter.moveNext() && resIter.moveNext()) {
@@ -179,41 +196,66 @@ Uint8List _reconstructTask(Map<String, Uint8List> data) {
 }
 
 // ─────────────────────────────────────────────
-// DOWNSIZE (pre-process before heavy ops)
+// HEIC / HEIF NORMALIZATION
+// The pure-Dart `image` package cannot decode HEIC/HEIF.
+// Convert to JPEG first using the native OS codec so all
+// subsequent Dart-side operations (residual, metrics) work normally.
 // ─────────────────────────────────────────────
 
-/// Downsizes [inputBytes] if it exceeds 15 MB.
-/// Uses native codec on mobile (decode-time downscale, far less RAM than
-/// decoding then resizing) and pure Dart on web.
-Future<Uint8List> downsizeImageIfNeeded(Uint8List inputBytes) async {
-  if (inputBytes.lengthInBytes < 15 * 1024 * 1024) return inputBytes;
+/// Converts HEIC/HEIF to JPEG if needed.
+/// Returns [inputBytes] unchanged for all other formats.
+Future<Uint8List> normalizeToDecodable(
+    Uint8List inputBytes, String fileName) async {
+  if (kIsWeb) return inputBytes; // web has no HEIC support anyway
 
-  if (kIsWeb) {
-    return compute(_downsizeFallbackTask, inputBytes);
-  }
+  final ext = fileName.toLowerCase().split('.').last;
+  if (ext != 'heic' && ext != 'heif') return inputBytes;
 
-  // minWidth / minHeight are MAX dimensions here — the codec keeps aspect ratio.
   return FlutterImageCompress.compressWithList(
     inputBytes,
-    minWidth: 3840,  // 4K
-    minHeight: 2160,
-    quality: 90,
+    format: CompressFormat.jpeg,
+    quality: 95,
+    minWidth: 16000,
+    minHeight: 16000,
   );
 }
 
-Uint8List _downsizeFallbackTask(Uint8List bytes) {
+// ─────────────────────────────────────────────
+// SAFETY DOWNSIZE — only called when image exceeds kMaxPixels.
+// This is a last-resort, not a default step.
+// ─────────────────────────────────────────────
+
+/// Downsizes only if the image exceeds [kMaxPixels].
+/// Preserves full resolution for anything under that cap.
+Future<Uint8List> safeDownsizeIfNeeded(Uint8List inputBytes) async {
+  if (kIsWeb) {
+    return compute(_safeDownsizePureDartTask, inputBytes);
+  }
+
+  // Use native codec — far less RAM than decode-then-resize in Dart
+  return FlutterImageCompress.compressWithList(
+    inputBytes,
+    // kDownsizeLongEdge on both axes; codec keeps aspect ratio
+    minWidth: kDownsizeLongEdge,
+    minHeight: kDownsizeLongEdge,
+    quality: 95, // near-lossless downsize
+  );
+}
+
+Uint8List _safeDownsizePureDartTask(Uint8List bytes) {
   var decoded = img.decodeImage(bytes);
   if (decoded == null) return bytes;
 
-  if (decoded.width > 3840 || decoded.height > 2160) {
-    final isLandscape = decoded.width > decoded.height;
-    decoded = img.copyResize(
-      decoded,
-      width: isLandscape ? 3840 : null,
-      height: isLandscape ? null : 2160,
-    );
-  }
-  return Uint8List.fromList(img.encodeJpg(decoded, quality: 90));
+  final pixels = decoded.width * decoded.height;
+  if (pixels <= kMaxPixels) return bytes;
+
+  final isLandscape = decoded.width >= decoded.height;
+  decoded = img.copyResize(
+    decoded,
+    width: isLandscape ? kDownsizeLongEdge : null,
+    height: isLandscape ? null : kDownsizeLongEdge,
+  );
+  return Uint8List.fromList(img.encodeJpg(decoded, quality: 95));
 }
 
 // ─────────────────────────────────────────────

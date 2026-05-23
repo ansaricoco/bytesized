@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import 'package:bytesized/file_utils.dart';
+import 'package:bytesized/image_processing.dart' show kMaxInputBytes;
 import 'package:bytesized/sharing_handler.dart';
 import 'result_screen.dart';
 
@@ -114,37 +115,38 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _checkSizeAndNavigate(
       List<XFile> files, ActionMode mode) async {
-    bool hasLargeImage = false;
+    // Check for files exceeding the hard limit before navigating,
+    // so we can show a friendly error here rather than on the result screen.
+    final maxMB = kMaxInputBytes ~/ 1048576;
     for (var file in files) {
       if (!file.name.toLowerCase().endsWith('.zip')) {
         final len = await file.length();
-        if (len >= 15 * 1024 * 1024) {
-          hasLargeImage = true;
-          break;
+        if (len > kMaxInputBytes) {
+          if (mounted) {
+            await showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                backgroundColor: const Color(0xFF1A1A1A),
+                title: const Text('File Too Large',
+                    style: TextStyle(color: Colors.white)),
+                content: Text(
+                  '${file.name} exceeds the $maxMB MB limit. '
+                  'Please choose a smaller file.',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('OK',
+                        style: TextStyle(color: Color(0xFF3B82F6))),
+                  ),
+                ],
+              ),
+            );
+          }
+          return; // Don't navigate
         }
       }
-    }
-
-    if (hasLargeImage && mounted) {
-      await showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF1A1A1A),
-          title: const Text('Large Image Detected',
-              style: TextStyle(color: Colors.white)),
-          content: const Text(
-            'One or more images are 15 MB or larger. They will be downsized to 4K before processing to prevent memory issues.',
-            style: TextStyle(color: Colors.white70),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('OK',
-                  style: TextStyle(color: Color(0xFF3B82F6))),
-            ),
-          ],
-        ),
-      );
     }
 
     if (mounted) await _navigateToResult(files, mode);
