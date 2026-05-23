@@ -5,9 +5,9 @@ import 'package:bytesized/home_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Cap Flutter's image cache to 50 MB so grid thumbnails don't accumulate
-  // and eat into the budget needed for compression work.
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 50 * 1024 * 1024;
+  // Increase Flutter's image cache to 250 MB so large images can fit into
+  // the cache without causing endless loading loops.
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 250 * 1024 * 1024;
 
   await Supabase.initialize(
     url: 'https://zkkzuknacdpinvmxlhkl.supabase.co',
