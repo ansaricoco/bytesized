@@ -25,7 +25,6 @@ class _HomeScreenState extends State<HomeScreen> {
   List<File> _recentFiles = [];
   bool _loadingHistory = true;
 
-  /// Quality value shown in the slider (1–100).
   int _quality = 80;
 
   final SharingHandler _sharingHandler = SharingHandler();
@@ -115,8 +114,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _checkSizeAndNavigate(
       List<XFile> files, ActionMode mode) async {
-    // Check for files exceeding the hard limit before navigating,
-    // so we can show a friendly error here rather than on the result screen.
     final maxMB = kMaxInputBytes ~/ 1048576;
     for (var file in files) {
       if (!file.name.toLowerCase().endsWith('.zip')) {
@@ -144,7 +141,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             );
           }
-          return; // Don't navigate
+          return;
         }
       }
     }
@@ -257,8 +254,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
-                    content:
-                        Text('File saved at:\n${file.path}'),
+                    content: Text('File saved at:\n${file.path}'),
                     duration: const Duration(seconds: 4),
                     behavior: SnackBarBehavior.floating,
                   ),
@@ -290,7 +286,6 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ── Header ────────────────────────────────────────────────
               const Text(
                 'ByteSized',
                 style: TextStyle(
@@ -309,7 +304,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 24),
 
-              // ── Quality Slider ────────────────────────────────────────
+              // ── Quality Slider ──
               Container(
                 padding: const EdgeInsets.symmetric(
                     horizontal: 16, vertical: 12),
@@ -395,7 +390,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 16),
 
-              // ── Action Cards ──────────────────────────────────────────
+              // ── Action Cards ──
               Row(
                 children: [
                   Expanded(
@@ -436,7 +431,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 32),
 
-              // ── Recent Files ──────────────────────────────────────────
+              // ── Recent Files ──
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
