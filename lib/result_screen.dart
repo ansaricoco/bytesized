@@ -521,6 +521,53 @@ class _ResultScreenState extends State<ResultScreen> {
     );
   }
 
+  /// Converts the compressed result (WebP/JPEG) to a standard JPEG and
+  /// opens the OS share sheet, so it can be sent through apps like
+  /// Messenger that have inconsistent WebP support. This is purely an
+  /// export/compatibility step — the underlying compression result,
+  /// MSE/SSIM metrics, and ZIP-with-residual flow are unaffected.
+  Future<void> _exportAsJpeg(int index) async {
+    final result = _resultBytesList[index];
+    if (result == null) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => SaveDialog(
+        title: 'Ready to share!',
+        processingText: 'Converting to JPEG...',
+        saveTask: () async {
+          final jpegBytes = await compute(_decodeToJpegTask, result) ??
+              await FlutterImageCompress.compressWithList(
+                result,
+                format: CompressFormat.jpeg,
+                quality: 95,
+                minWidth: 16000,
+                minHeight: 16000,
+              );
+
+          final outName =
+              'bytesized_export_${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+          if (kIsWeb) {
+            downloadBytes(jpegBytes, outName);
+            return 'JPEG download started.';
+          }
+
+          final tempDir = await getTemporaryDirectory();
+          final file = File('${tempDir.path}/$outName');
+          await file.writeAsBytes(jpegBytes);
+
+          await Share.shareXFiles(
+            [XFile(file.path, mimeType: 'image/jpeg')],
+            subject: outName,
+          );
+          return 'Use the share sheet to send via Messenger or save it.';
+        },
+      ),
+    );
+  }
+
   Future<void> _saveAll() async {
     if (_processingList.any((p) => p)) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -655,6 +702,7 @@ class _ResultScreenState extends State<ResultScreen> {
             ssim: _ssimList[index],
             onSave: () => _save(index),
             onSaveZip: () => _saveZip(index),
+            onExportJpeg: () => _exportAsJpeg(index),
           );
         },
       ),
@@ -839,6 +887,7 @@ class _ResultItemView extends StatelessWidget {
 
   final VoidCallback onSave;
   final VoidCallback onSaveZip;
+  final VoidCallback onExportJpeg;
 
   const _ResultItemView({
     super.key,
@@ -859,6 +908,7 @@ class _ResultItemView extends StatelessWidget {
     required this.ssim,
     required this.onSave,
     required this.onSaveZip,
+    required this.onExportJpeg,
   });
 
   int get _resultSize => resultBytes?.length ?? 0;
@@ -1114,7 +1164,7 @@ class _ResultItemView extends StatelessWidget {
                 ),
                 child: const Text(
                   'Residual-based reconstruction is unavailable for images '
-                  'above 15 MB to ensure stable performance. Only the '
+                  'above 30 MB to ensure stable performance. Only the '
                   'compressed output is provided for this image.',
                   style: TextStyle(color: Colors.white54, fontSize: 12),
                 ),
@@ -1139,6 +1189,27 @@ class _ResultItemView extends StatelessWidget {
                 ),
               ),
             ),
+            if (isCompress) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: onExportJpeg,
+                  icon: const Icon(Icons.ios_share_rounded, size: 18),
+                  label: const Text('Export as JPEG (for Messenger, etc.)'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF3B82F6),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                    elevation: 0,
+                    textStyle: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             if ((isCompress && residualBytes != null) ||
                 isZipDecompress) ...[

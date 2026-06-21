@@ -8,24 +8,22 @@ import 'package:image/image.dart' as img;
 // LIMITS
 // ─────────────────────────────────────────────
 
-/// Absolute hard cap — anything above this is rejected outright.
-const int kMaxInputBytes = 250 * 1024 * 1024;
+/// MAX CAP of Bytesized
+const int kMaxInputBytes = 200 * 1024 * 1024;
 
-/// Above this, the full Deep Lossy + Residual pipeline is skipped.
-/// Images larger than this are compressed via the native codec only
-/// (no residual, no reconstruction) to avoid Dart-side memory crashes.
+/// Any file size above this skips the residual pipeline (wala nang reconstruction) so no dart-side memory crashes
 const int kResidualPipelineLimit = 30 * 1024 * 1024; // 30 MB lang yung pwedeng dalin sa reconstruction
 
 
-/// Pixel-count threshold (within the residual pipeline) above which
-/// the image is downsized before residual computation.
+/// Pixel-count threshold (within the residual pipeline) above which the image is downsized before residual computation.
 ///const int kMaxPixels = 6000 * 4000; // mas stable
-const int kMaxPixels = 13600 * 5500; // MAX OF SYSTEM
+const int kMaxPixels = 2000 * 2000; // if gusto performance
+///const int kMaxPixels = 13600 * 5500; // if gusto macompress gang 30 mb
 
 /// Long-edge target when downsizing.
 const int kDownsizeLongEdge = 2048;
 
-/// Number of horizontal strips for parallel residual processing.
+/// Number of horizontal strips for parallel residual processing. concurrency
 const int kResidualStrips = 4;
 
 // ─────────────────────────────────────────────
@@ -45,8 +43,8 @@ Future<Uint8List> encodeToWebP(Uint8List inputBytes,
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
-    minWidth: 16000,
-    minHeight: 16000,
+    minWidth: kDownsizeLongEdge,
+    minHeight: kDownsizeLongEdge,
   );
 }
 
@@ -225,8 +223,8 @@ Future<Map<String, Uint8List>> compressAndComputeResidual(
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
-    minWidth: 16000,
-    minHeight: 16000,
+    minWidth: kDownsizeLongEdge,
+    minHeight: kDownsizeLongEdge,
   );
 
   final residualBytes =
@@ -332,8 +330,8 @@ Future<Uint8List> normalizeToDecodable(
     inputBytes,
     format: CompressFormat.jpeg,
     quality: 95,
-    minWidth: 16000,
-    minHeight: 16000,
+    minWidth: kDownsizeLongEdge,
+    minHeight: kDownsizeLongEdge,
   );
 }
 
