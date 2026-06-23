@@ -17,8 +17,8 @@ const int kResidualPipelineLimit = 30 * 1024 * 1024; // 30 MB lang yung pwedeng 
 
 /// Pixel-count threshold (within the residual pipeline) above which the image is downsized before residual computation.
 ///const int kMaxPixels = 6000 * 4000; // mas stable
-const int kMaxPixels = 2000 * 2000; // if gusto performance
-///const int kMaxPixels = 13600 * 5500; // if gusto macompress gang 30 mb
+///const int kMaxPixels = 2000 * 2000; // if gusto performance
+const int kMaxPixels = 13600 * 5500; // if gusto macompress gang 30 mb
 
 /// Long-edge target when downsizing.
 const int kDownsizeLongEdge = 2048;
@@ -223,8 +223,8 @@ Future<Map<String, Uint8List>> compressAndComputeResidual(
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
-    minWidth: kDownsizeLongEdge,
-    minHeight: kDownsizeLongEdge,
+    minWidth: 13600,
+    minHeight: 5500,
   );
 
   final residualBytes =
@@ -330,8 +330,8 @@ Future<Uint8List> normalizeToDecodable(
     inputBytes,
     format: CompressFormat.jpeg,
     quality: 95,
-    minWidth: kDownsizeLongEdge,
-    minHeight: kDownsizeLongEdge,
+    minWidth: 13600,
+    minHeight: 5500,
   );
 }
 
@@ -348,8 +348,8 @@ Future<Uint8List> safeDownsizeIfNeeded(Uint8List inputBytes) async {
 
   return FlutterImageCompress.compressWithList(
     inputBytes,
-    minWidth: kDownsizeLongEdge,
-    minHeight: kDownsizeLongEdge,
+    minWidth: 13600,
+    minHeight: 5500,
     quality: 92,
   );
 }
