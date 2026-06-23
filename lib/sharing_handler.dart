@@ -5,9 +5,12 @@ import 'package:flutter/services.dart';
 import 'package:app_links/app_links.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'dart:async';
+
 class SharingHandler {
   final _supabase = Supabase.instance.client;
   final _appLinks = AppLinks();
+  StreamSubscription<Uri>? _linkSubscription;
 
   /// Compresses and shares multiple images as a Master ZIP payload.
   Future<String?> shareImages({
@@ -79,9 +82,14 @@ class SharingHandler {
   void listenForDeepLinks(
       Function(List<Uint8List> bytesList, List<String> names, String type) onDataReceived,
       {Function(String)? onStatus, Function()? onStarted, Function()? onDone}) {
-    _appLinks.uriLinkStream.listen((uri) {
+    _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
       _handleIncomingUri(uri, onDataReceived, onStatus: onStatus, onStarted: onStarted, onDone: onDone);
     });
+  }
+
+  /// Disposes the stream subscription to prevent memory leaks.
+  void dispose() {
+    _linkSubscription?.cancel();
   }
 
   /// Checks if the app was started by a deep link
