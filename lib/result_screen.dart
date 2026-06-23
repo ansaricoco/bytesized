@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../image_utils_stub.dart' if (dart.library.html) '../image_utils_web.dart';
 import 'package:bytesized/file_utils.dart';
+import 'package:bytesized/native_downsize.dart';
 import 'package:bytesized/image_processing.dart';
 
 // ─────────────────────────────────────────────
@@ -146,6 +147,7 @@ class _ResultScreenState extends State<ResultScreen> {
     try {
       final fileLength = await widget.files[index].length();
       final fileName = widget.files[index].name;
+      final filePath = widget.files[index].path;
 
       if (fileLength > kMaxInputBytes) {
         throw Exception(
@@ -154,9 +156,41 @@ class _ResultScreenState extends State<ResultScreen> {
         );
       }
 
+      // PRE-PROCESS VERY LARGE IMAGES to prevent OOM crash from readAsBytes()
+      // This path uses memory-efficient, path-based functions on mobile.
+      if (widget.mode == ActionMode.compress && !kIsWeb) {
+        ui.Size? dimensions;
+        try {
+          dimensions = await probeImageDimensionsFromFile(filePath);
+        } catch (_) {
+          // Could not probe, will fallback to byte-based processing.
+        }
+
+        if (dimensions != null &&
+            (dimensions.width * dimensions.height) >
+                kNativeDownsizeTriggerPixels) {
+          if (mounted) {
+            setState(() {
+              _wasDownsizedList[index] = true;
+              _noResidualList[index] = true; // Large image path implies no residual
+            });
+          }
+          // Downsize from path, avoiding loading the full file into memory.
+          final downsizedBytes = await nativeSampledDownsizeFromFile(filePath);
+
+          // The result is now small enough to be safely handled.
+          // Feed it into the `compressLargeImage` function.
+          final result =
+              await compressLargeImage(downsizedBytes, quality: widget.quality);
+          await _handleCompressionSuccess(index, result, null, fileLength, downsizedBytes);
+          return;
+        }
+      }
+
+      // For smaller images, web, or decompression, proceed with the byte-based pipeline.
+      // This is the original logic, which is acceptable for non-huge files.
       Uint8List workingBytes = await widget.files[index].readAsBytes();
-      final isZip = fileName.toLowerCase().endsWith('.zip') ||
-          _looksLikeZip(workingBytes);
+      final isZip = fileName.toLowerCase().endsWith('.zip') || _looksLikeZip(workingBytes);
 
       // ── COMPRESS MODE ──────────────────────────────────────────────
       if (!isZip && widget.mode == ActionMode.compress) {
@@ -233,26 +267,7 @@ class _ResultScreenState extends State<ResultScreen> {
           }
         }
 
-        String? resResolution;
-        try {
-          final buffer = await ui.ImmutableBuffer.fromUint8List(result);
-          final descriptor = await ui.ImageDescriptor.encoded(buffer);
-          resResolution = '${descriptor.width} x ${descriptor.height}';
-          descriptor.dispose();
-          buffer.dispose();
-        } catch (_) {}
-
-        if (mounted) {
-          setState(() {
-            _resultBytesList[index] = result;
-            _residualBytesList[index] = residual;
-            _resultResolutionList[index] = resResolution;
-            if (_originalSizeList[index] == null) {
-              _originalSizeList[index] = fileLength;
-            }
-            _processingList[index] = false;
-          });
-        }
+        await _handleCompressionSuccess(index, result, residual, fileLength, workingBytes);
         return;
       }
 
@@ -295,6 +310,35 @@ class _ResultScreenState extends State<ResultScreen> {
           _processingList[index] = false;
         });
       }
+    }
+  }
+
+  Future<void> _handleCompressionSuccess(int index, Uint8List result,
+      Uint8List? residual, int originalFileLength,
+      [Uint8List? inputBytes]) async {
+    String? resResolution;
+    try {
+      // This part is cheap as the result bytes are for a smaller, compressed image.
+      final buffer = await ui.ImmutableBuffer.fromUint8List(result);
+      final descriptor = await ui.ImageDescriptor.encoded(buffer);
+      resResolution = '${descriptor.width} x ${descriptor.height}';
+      descriptor.dispose();
+      buffer.dispose();
+    } catch (e, s) {
+      debugPrint('Could not get result resolution: $e\n$s');
+    }
+
+    if (mounted) {
+      setState(() {
+        _resultBytesList[index] = result;
+        _residualBytesList[index] = residual;
+        _resultResolutionList[index] = resResolution;
+        if (_originalSizeList[index] == null) {
+          _originalSizeList[index] = originalFileLength;
+        }
+        if (inputBytes != null) _inputDisplayBytesList[index] = inputBytes;
+        _processingList[index] = false;
+      });
     }
   }
 
