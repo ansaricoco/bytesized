@@ -113,6 +113,23 @@ class _ResultScreenState extends State<ResultScreen> {
     }
   }
 
+  /// Computes residual and metrics after the initial compression is already shown.
+  /// This runs in the background and updates the UI when complete.
+  Future<void> _computeAndSetPostProcessData(
+      int index, Uint8List original, Uint8List lossy) async {
+    final residual = await computeResidualOnDemand(original, lossy);
+    final metrics = await computeImageMetrics(original, lossy);
+
+    // Update the UI with the new data when ready
+    if (mounted) {
+      setState(() {
+        _residualBytesList[index] = residual;
+        _mseList[index] = metrics['mse'];
+        _ssimList[index] = metrics['ssim'];
+      });
+    }
+  }
+
   Future<void> _fetchInputResolution(int index) async {
     try {
       final len = await widget.files[index].length();
@@ -251,20 +268,19 @@ class _ResultScreenState extends State<ResultScreen> {
             } catch (_) {}
           }
 
-          final output = await compressAndComputeResidual(
+          // 1. Compress and immediately show the result to the user.
+          result = await compressImageOnly(
             workingBytes,
             quality: widget.quality,
           );
-          result = output['lossy']!;
-          residual = output['residual'];
+          // This first call to `_handleCompressionSuccess` has no residual/metrics yet.
+          await _handleCompressionSuccess(
+              index, result, null, fileLength, workingBytes);
 
-          final metrics = await computeImageMetrics(workingBytes, result);
-          if (mounted) {
-            setState(() {
-              _mseList[index] = metrics['mse'];
-              _ssimList[index] = metrics['ssim'];
-            });
-          }
+          // 2. In the background, compute the heavy stuff (residual, metrics)
+          //    and update the UI again when they're ready.
+          _computeAndSetPostProcessData(index, workingBytes, result);
+          return; // Exit the _process function here for the small image path.
         }
 
         await _handleCompressionSuccess(index, result, residual, fileLength, workingBytes);
@@ -1170,21 +1186,34 @@ class _ResultItemView extends StatelessWidget {
               const SizedBox(height: 4),
               _InfoRow(label: 'Resolution', value: resultResolution!),
             ],
-            if (mse != null && ssim != null) ...[
-              const SizedBox(height: 4),
-              _InfoRow(
-                  label: 'MSE (vs Input)',
-                  value: mse!.toStringAsFixed(2)),
-              const SizedBox(height: 4),
-              _InfoRow(
-                  label: 'SSIM (vs Input)',
-                  value: ssim!.toStringAsFixed(4)),
+            if (isCompress && !noResidual) ...[
+              // For compression, show metrics when available, or a loading indicator.
+              if (mse != null && ssim != null) ...[
+                const SizedBox(height: 4),
+                _InfoRow(
+                    label: 'MSE (vs Input)', value: mse!.toStringAsFixed(2)),
+                const SizedBox(height: 4),
+                _InfoRow(
+                    label: 'SSIM (vs Input)', value: ssim!.toStringAsFixed(4)),
+              ] else ...[
+                const SizedBox(height: 4),
+                const _InfoRow(label: 'MSE (vs Input)', value: 'Calculating...'),
+                const SizedBox(height: 4),
+                const _InfoRow(label: 'SSIM (vs Input)', value: 'Calculating...'),
+              ]
             ] else if (isZipDecompress) ...[
-              const SizedBox(height: 4),
-              const _InfoRow(
-                  label: 'Metrics',
-                  value: 'Original missing in ZIP',
-                  valueColor: Colors.white54),
+              // For ZIP decompression, show metrics only if they were in the ZIP.
+              if (mse != null && ssim != null) ...[
+                const SizedBox(height: 4),
+                _InfoRow(
+                    label: 'MSE (vs Original)', value: mse!.toStringAsFixed(2)),
+                const SizedBox(height: 4),
+                _InfoRow(
+                    label: 'SSIM (vs Original)', value: ssim!.toStringAsFixed(4)),
+              ] else ...[
+                const SizedBox(height: 4),
+                const _InfoRow(label: 'Metrics', value: 'Original missing in ZIP', valueColor: Colors.white54),
+              ],
             ],
             if (isCompress || isZipDecompress) ...[
               const SizedBox(height: 4),

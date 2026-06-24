@@ -85,41 +85,39 @@ Future<Uint8List> compressLargeImage(
 // SINGLE-ISOLATE COMPRESS + RESIDUAL (web fallback)
 // ─────────────────────────────────────────────
 
-Map<String, Uint8List> _compressAndResidualPureDartTask(
-    Map<String, dynamic> data) {
-  final Uint8List inputBytes = data['bytes'];
-  final int quality = data['quality'];
+/// Computes the residual difference between two images in a separate isolate.
+/// This is the pure-Dart fallback for web.
+Uint8List _computeResidualPureDartTask(Map<String, dynamic> data) {
+  final Uint8List originalBytes = data['original'];
+  final Uint8List lossyBytes = data['lossy'];
 
-  final original = img.decodeImage(inputBytes);
+  final original = img.decodeImage(originalBytes);
   if (original == null) throw Exception('Could not decode image');
-
-  final lossyBytes =
-      Uint8List.fromList(img.encodeJpg(original, quality: quality));
 
   var lossyImg = img.decodeImage(lossyBytes);
   if (lossyImg == null) throw Exception('Could not decode lossy image');
+
   if (lossyImg.width != original.width ||
       lossyImg.height != original.height) {
     lossyImg = img.copyResize(lossyImg,
         width: original.width, height: original.height);
   }
 
-  final origBytes = original.getBytes(order: img.ChannelOrder.rgba);
-  final lossBytes = lossyImg.getBytes(order: img.ChannelOrder.rgba);
-  final residualData = Uint8List(origBytes.length);
-  for (int i = 0; i < origBytes.length; i++) {
-    residualData[i] = (origBytes[i] - lossBytes[i]) & 0xFF;
+  final originalBuffer = original.getBytes(order: img.ChannelOrder.rgba);
+  final lossyBuffer = lossyImg.getBytes(order: img.ChannelOrder.rgba);
+  final residualBuffer = Uint8List(originalBuffer.length);
+  for (int i = 0; i < originalBuffer.length; i++) {
+    residualBuffer[i] = (originalBuffer[i] - lossyBuffer[i]) & 0xFF;
   }
 
   final residualImg = img.Image.fromBytes(
     width: original.width,
     height: original.height,
-    bytes: residualData.buffer,
+    bytes: residualBuffer.buffer,
     order: img.ChannelOrder.rgba,
   );
 
-  final residualBytes = Uint8List.fromList(img.encodePng(residualImg));
-  return {'lossy': lossyBytes, 'residual': residualBytes};
+  return Uint8List.fromList(img.encodePng(residualImg));
 }
 
 // ─────────────────────────────────────────────
@@ -204,33 +202,48 @@ Uint8List _computeResidualStripTask(Map<String, dynamic> data) {
 }
 
 // ─────────────────────────────────────────────
-// MAIN COMPRESS + RESIDUAL ENTRY POINT
-// Only used for images within kResidualPipelineLimit.
+// DECOUPLED COMPRESSION & RESIDUAL COMPUTATION
 // ─────────────────────────────────────────────
 
-Future<Map<String, Uint8List>> compressAndComputeResidual(
+/// Performs only the initial lossy compression.
+/// This is fast and can be run immediately to show the user a result.
+Future<Uint8List> compressImageOnly(
   Uint8List inputBytes, {
   int quality = 80,
 }) async {
   if (kIsWeb) {
+    // On web, use the existing pure-Dart JPEG encoder.
     return compute(
-      _compressAndResidualPureDartTask,
-      {'bytes': inputBytes, 'quality': quality},
-    );
+        _encodeFallbackTask, {'bytes': inputBytes, 'quality': quality});
   }
 
-  final lossyBytes = await FlutterImageCompress.compressWithList(
+  // On mobile, use the fast native WebP encoder.
+  return FlutterImageCompress.compressWithList(
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
     minWidth: 13600,
     minHeight: 5500,
+    minWidth: kDownsizeLongEdge,
+    minHeight: kDownsizeLongEdge,
   );
+}
 
-  final residualBytes =
-      await _computeResidualParallel(inputBytes, lossyBytes);
+/// Computes the residual on-demand, for when the user wants to download
+/// the data needed for reconstruction.
+/// Only used for images within [kResidualPipelineLimit].
+Future<Uint8List> computeResidualOnDemand(
+  Uint8List originalBytes,
+  Uint8List lossyBytes,
+) async {
+  if (kIsWeb) {
+    return compute(
+      _computeResidualPureDartTask,
+      {'original': originalBytes, 'lossy': lossyBytes},
+    );
+  }
 
-  return {'lossy': lossyBytes, 'residual': residualBytes};
+  return _computeResidualParallel(originalBytes, lossyBytes);
 }
 
 // ─────────────────────────────────────────────
@@ -269,8 +282,11 @@ Future<Uint8List> reconstructFromResidual(
         x: 0, y: startY, width: width, height: endY - startY);
 
     futures.add(compute(_reconstructStripTask, {
-      'lossy': Uint8List.fromList(img.encodePng(lossyStrip)),
-      'residual': Uint8List.fromList(img.encodePng(residualStrip)),
+      'lossy_bytes': lossyStrip.getBytes(order: img.ChannelOrder.rgba),
+      'residual_bytes':
+          residualStrip.getBytes(order: img.ChannelOrder.rgba),
+      'width': lossyStrip.width,
+      'height': lossyStrip.height,
     }));
   }
 
@@ -279,8 +295,12 @@ Future<Uint8List> reconstructFromResidual(
   final result = img.Image(width: width, height: height);
   int currentY = 0;
   for (final stripBytes in strips) {
-    final strip = img.decodeImage(stripBytes);
-    if (strip == null) continue;
+    final strip = img.Image.fromBytes(
+      width: width,
+      height: (stripBytes.length / (width * 4)).round(),
+      bytes: stripBytes.buffer,
+      order: img.ChannelOrder.rgba,
+    );
     img.compositeImage(result, strip, dstY: currentY);
     currentY += strip.height;
   }
@@ -289,30 +309,20 @@ Future<Uint8List> reconstructFromResidual(
 }
 
 Uint8List _reconstructStripTask(Map<String, dynamic> data) {
-  final lossyImg = img.decodeImage(data['lossy'] as Uint8List);
-  final residualImg = img.decodeImage(data['residual'] as Uint8List);
+  final lossyBuffer = data['lossy_bytes'] as Uint8List;
+  final residualBuffer = data['residual_bytes'] as Uint8List;
+  // final width = data['width'] as int;
+  // final height = data['height'] as int;
 
-  if (lossyImg == null || residualImg == null) {
-    throw Exception('Strip reconstruction failed.');
-  }
-
-  final lossyBuffer = lossyImg.getBytes(order: img.ChannelOrder.rgba);
-  final residualBuffer =
-      residualImg.getBytes(order: img.ChannelOrder.rgba);
   final resultBuffer = Uint8List(lossyBuffer.length);
 
   for (int i = 0; i < lossyBuffer.length; i++) {
     resultBuffer[i] = (lossyBuffer[i] + residualBuffer[i]) & 0xFF;
   }
 
-  final resultImg = img.Image.fromBytes(
-    width: lossyImg.width,
-    height: lossyImg.height,
-    bytes: resultBuffer.buffer,
-    order: img.ChannelOrder.rgba,
-  );
-
-  return Uint8List.fromList(img.encodePng(resultImg));
+  // Return the raw reconstructed bytes directly. The main isolate will
+  // reconstruct the Image object.
+  return resultBuffer;
 }
 
 // ─────────────────────────────────────────────
@@ -332,6 +342,8 @@ Future<Uint8List> normalizeToDecodable(
     quality: 95,
     minWidth: 13600,
     minHeight: 5500,
+    minWidth: kDownsizeLongEdge,
+    minHeight: kDownsizeLongEdge,
   );
 }
 
@@ -350,6 +362,8 @@ Future<Uint8List> safeDownsizeIfNeeded(Uint8List inputBytes) async {
     inputBytes,
     minWidth: 13600,
     minHeight: 5500,
+    minWidth: kDownsizeLongEdge,
+    minHeight: kDownsizeLongEdge,
     quality: 92,
   );
 }
