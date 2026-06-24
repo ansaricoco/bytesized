@@ -14,14 +14,17 @@ const int kMaxInputBytes = 200 * 1024 * 1024;
 /// Any file size above this skips the residual pipeline (wala nang reconstruction) so no dart-side memory crashes
 const int kResidualPipelineLimit = 30 * 1024 * 1024; // 30 MB lang yung pwedeng dalin sa reconstruction
 
-
 /// Pixel-count threshold (within the residual pipeline) above which the image is downsized before residual computation.
-///const int kMaxPixels = 6000 * 4000; // mas stable
-///const int kMaxPixels = 2000 * 2000; // if gusto performance
 const int kMaxPixels = 13600 * 5500; // if gusto macompress gang 30 mb
 
-/// Long-edge target when downsizing.
+/// Long-edge target when downsizing for compression / residual computation.
 const int kDownsizeLongEdge = 2048;
+
+/// Maximum long-edge for upscaling during reconstruction.
+/// Keeps peak Dart-side RGBA buffer under ~256 MB on most devices.
+/// 8192 × 5580 × 4 bytes ≈ 183 MB — safe for modern phones.
+/// Lower this to 4096 if you see OOM on low-end devices.
+const int kReconstructUpscaleCap = 8192;
 
 /// Number of horizontal strips for parallel residual processing. concurrency
 const int kResidualStrips = 4;
@@ -76,7 +79,7 @@ Future<Uint8List> compressLargeImage(
     inputBytes,
     format: CompressFormat.webp,
     quality: quality,
-    minWidth: kDownsizeLongEdge, ///edit
+    minWidth: kDownsizeLongEdge,
     minHeight: kDownsizeLongEdge,
   );
 }
@@ -224,8 +227,6 @@ Future<Uint8List> compressImageOnly(
     quality: quality,
     minWidth: 13600,
     minHeight: 5500,
-    minWidth: kDownsizeLongEdge,
-    minHeight: kDownsizeLongEdge,
   );
 }
 
@@ -250,8 +251,19 @@ Future<Uint8List> computeResidualOnDemand(
 // PARALLEL RECONSTRUCTION
 // ─────────────────────────────────────────────
 
+/// Reconstructs from lossy + residual, then upscales the result
+/// toward [targetWidth] × [targetHeight] (the original image dimensions),
+/// capped at [kReconstructUpscaleCap] on the long edge to avoid OOM.
+///
+/// If [targetWidth] and [targetHeight] are both 0 (unknown / not stored in
+/// ZIP), reconstruction returns the image at whatever resolution the
+/// WebP + residual were stored at — same behaviour as before.
 Future<Uint8List> reconstructFromResidual(
-    Uint8List lossyBytes, Uint8List residualBytes) async {
+  Uint8List lossyBytes,
+  Uint8List residualBytes, {
+  int targetWidth = 0,
+  int targetHeight = 0,
+}) async {
   final lossyImg = img.decodeImage(lossyBytes);
   var residualImg = img.decodeImage(residualBytes);
 
@@ -292,7 +304,7 @@ Future<Uint8List> reconstructFromResidual(
 
   final strips = await Future.wait(futures);
 
-  final result = img.Image(width: width, height: height);
+  var result = img.Image(width: width, height: height);
   int currentY = 0;
   for (final stripBytes in strips) {
     final strip = img.Image.fromBytes(
@@ -305,14 +317,45 @@ Future<Uint8List> reconstructFromResidual(
     currentY += strip.height;
   }
 
+  // ── Upscale toward the original dimensions ────────────────────────────
+  // Only upscale if the caller supplied a valid target that is larger than
+  // the reconstructed image on at least one axis.
+  if (targetWidth > 0 && targetHeight > 0 &&
+      (targetWidth > result.width || targetHeight > result.height)) {
+
+    // Determine the safe upscale target, respecting kReconstructUpscaleCap.
+    final isLandscape = targetWidth >= targetHeight;
+    int upW, upH;
+
+    if (isLandscape) {
+      // Cap the long (width) edge.
+      upW = targetWidth.clamp(result.width, kReconstructUpscaleCap);
+      // Scale height proportionally from the capped width.
+      upH = (upW * targetHeight / targetWidth).round();
+    } else {
+      // Cap the long (height) edge.
+      upH = targetHeight.clamp(result.height, kReconstructUpscaleCap);
+      // Scale width proportionally from the capped height.
+      upW = (upH * targetWidth / targetHeight).round();
+    }
+
+    // Only bother if the capped target is meaningfully larger than what we have.
+    if (upW > result.width || upH > result.height) {
+      result = img.copyResize(
+        result,
+        width: upW,
+        height: upH,
+        interpolation: img.Interpolation.cubic, // Lanczos not in this pkg; cubic is the next best
+      );
+    }
+  }
+
   return Uint8List.fromList(img.encodeJpg(result, quality: 95));
 }
 
 Uint8List _reconstructStripTask(Map<String, dynamic> data) {
   final lossyBuffer = data['lossy_bytes'] as Uint8List;
   final residualBuffer = data['residual_bytes'] as Uint8List;
-  // final width = data['width'] as int;
-  // final height = data['height'] as int;
 
   final resultBuffer = Uint8List(lossyBuffer.length);
 
@@ -342,8 +385,6 @@ Future<Uint8List> normalizeToDecodable(
     quality: 95,
     minWidth: 13600,
     minHeight: 5500,
-    minWidth: kDownsizeLongEdge,
-    minHeight: kDownsizeLongEdge,
   );
 }
 
@@ -362,8 +403,6 @@ Future<Uint8List> safeDownsizeIfNeeded(Uint8List inputBytes) async {
     inputBytes,
     minWidth: 13600,
     minHeight: 5500,
-    minWidth: kDownsizeLongEdge,
-    minHeight: kDownsizeLongEdge,
     quality: 92,
   );
 }

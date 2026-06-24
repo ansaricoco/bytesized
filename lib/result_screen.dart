@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -19,12 +20,33 @@ import 'package:bytesized/image_processing.dart';
 // ─────────────────────────────────────────────
 // TOP LEVEL COMPUTE TASKS
 // ─────────────────────────────────────────────
+
+/// Encodes the compress result, residual, and optional original into a ZIP.
+/// [origW] and [origH] are the true pixel dimensions of the original image
+/// BEFORE any downsize — stored in meta.json so reconstruction can upscale
+/// back toward the original size.
 List<int>? _encodeZipTask(Map<String, dynamic> data) {
   final archive = Archive();
   final result = data['result'] as Uint8List;
-  final residual = data['residual'] as Uint8List;
+  final Uint8List? residual = data['residual'] as Uint8List?;
+  final int origW = data['orig_w'] as int? ?? 0;
+  final int origH = data['orig_h'] as int? ?? 0;
+
   archive.addFile(ArchiveFile('image.webp', result.length, result));
-  archive.addFile(ArchiveFile('residual.png', residual.length, residual));
+
+  // Residual is null for the large-image path — ZIP still valid without it.
+  if (residual != null) {
+    archive.addFile(ArchiveFile('residual.png', residual.length, residual));
+  }
+
+  // Store original dimensions as a tiny JSON file.
+  // This lets the decompressor upscale toward the original resolution
+  // (capped at kReconstructUpscaleCap) even when there is no residual.
+  if (origW > 0 && origH > 0) {
+    final metaJson = utf8.encode(jsonEncode({'orig_w': origW, 'orig_h': origH}));
+    archive.addFile(ArchiveFile('meta.json', metaJson.length, metaJson));
+  }
+
   if (data['original'] != null) {
     final original = data['original'] as Uint8List;
     archive.addFile(ArchiveFile('original_image', original.length, original));
@@ -78,7 +100,13 @@ class _ResultScreenState extends State<ResultScreen> {
   late List<String?> _resultResolutionList;
   late List<double?> _mseList;
   late List<double?> _ssimList;
-  late List<bool> _noResidualList; // true when large-image path was used
+  late List<bool> _noResidualList;
+
+  /// True pixel dimensions of the original image before any downsize.
+  /// Stored so they can be written into meta.json inside the ZIP,
+  /// enabling upscaling during reconstruction.
+  late List<int> _origWidthList;
+  late List<int> _origHeightList;
 
   @override
   void dispose() {
@@ -102,6 +130,8 @@ class _ResultScreenState extends State<ResultScreen> {
     _mseList = List.filled(count, null);
     _ssimList = List.filled(count, null);
     _noResidualList = List.filled(count, false);
+    _origWidthList = List.filled(count, 0);
+    _origHeightList = List.filled(count, 0);
 
     _processAllSequentially(count);
   }
@@ -114,13 +144,11 @@ class _ResultScreenState extends State<ResultScreen> {
   }
 
   /// Computes residual and metrics after the initial compression is already shown.
-  /// This runs in the background and updates the UI when complete.
   Future<void> _computeAndSetPostProcessData(
       int index, Uint8List original, Uint8List lossy) async {
     final residual = await computeResidualOnDemand(original, lossy);
     final metrics = await computeImageMetrics(original, lossy);
 
-    // Update the UI with the new data when ready
     if (mounted) {
       setState(() {
         _residualBytesList[index] = residual;
@@ -154,12 +182,6 @@ class _ResultScreenState extends State<ResultScreen> {
   }
 
   /// Main processing entry point.
-  ///
-  /// Branches into two pipelines based on file size:
-  /// - <= kResidualPipelineLimit: full Deep Lossy + Residual pipeline
-  ///   with reconstruction support (Dart-side pixel operations).
-  /// - > kResidualPipelineLimit: native-codec-only compression with
-  ///   no residual, to avoid Dart-side full-decode OOM crashes.
   Future<void> _process(int index) async {
     try {
       final fileLength = await widget.files[index].length();
@@ -174,29 +196,31 @@ class _ResultScreenState extends State<ResultScreen> {
       }
 
       // PRE-PROCESS VERY LARGE IMAGES to prevent OOM crash from readAsBytes()
-      // This path uses memory-efficient, path-based functions on mobile.
       if (widget.mode == ActionMode.compress && !kIsWeb) {
         ui.Size? dimensions;
         try {
           dimensions = await probeImageDimensionsFromFile(filePath);
-        } catch (_) {
-          // Could not probe, will fallback to byte-based processing.
-        }
+        } catch (_) {}
 
         if (dimensions != null &&
             (dimensions.width * dimensions.height) >
                 kNativeDownsizeTriggerPixels) {
+
+          // Capture the true original dimensions BEFORE downsize so they
+          // can be embedded in meta.json for upscaling on reconstruct.
+          final trueW = dimensions.width.toInt();
+          final trueH = dimensions.height.toInt();
+
           if (mounted) {
             setState(() {
               _wasDownsizedList[index] = true;
-              _noResidualList[index] = true; // Large image path implies no residual
+              _noResidualList[index] = true;
+              _origWidthList[index] = trueW;
+              _origHeightList[index] = trueH;
             });
           }
-          // Downsize from path, avoiding loading the full file into memory.
-          final downsizedBytes = await nativeSampledDownsizeFromFile(filePath);
 
-          // The result is now small enough to be safely handled.
-          // Feed it into the `compressLargeImage` function.
+          final downsizedBytes = await nativeSampledDownsizeFromFile(filePath);
           final result =
               await compressLargeImage(downsizedBytes, quality: widget.quality);
           await _handleCompressionSuccess(index, result, null, fileLength, downsizedBytes);
@@ -204,8 +228,6 @@ class _ResultScreenState extends State<ResultScreen> {
         }
       }
 
-      // For smaller images, web, or decompression, proceed with the byte-based pipeline.
-      // This is the original logic, which is acceptable for non-huge files.
       Uint8List workingBytes = await widget.files[index].readAsBytes();
       final isZip = fileName.toLowerCase().endsWith('.zip') || _looksLikeZip(workingBytes);
 
@@ -219,9 +241,22 @@ class _ResultScreenState extends State<ResultScreen> {
         Uint8List? residual;
 
         if (fileLength > kResidualPipelineLimit) {
-          // ── LARGE IMAGE PATH ──
-          // Native codec only — no Dart-side decode, no residual.
+          // ── LARGE IMAGE PATH: native codec only, no residual ──
           if (mounted) setState(() => _noResidualList[index] = true);
+
+          // Probe true dimensions before any processing so we can store them.
+          try {
+            final buffer = await ui.ImmutableBuffer.fromUint8List(workingBytes);
+            final descriptor = await ui.ImageDescriptor.encoded(buffer);
+            if (mounted) {
+              setState(() {
+                _origWidthList[index] = descriptor.width;
+                _origHeightList[index] = descriptor.height;
+              });
+            }
+            descriptor.dispose();
+            buffer.dispose();
+          } catch (_) {}
 
           result = await compressLargeImage(
             workingBytes,
@@ -232,7 +267,7 @@ class _ResultScreenState extends State<ResultScreen> {
           // ── SMALL IMAGE PATH: full residual pipeline ──
           workingBytes = await normalizeToDecodable(workingBytes, fileName);
 
-          // Downsize if resolution exceeds the safe pixel threshold
+          // Probe dimensions to decide whether to downsize.
           int width = 0, height = 0;
           try {
             final buffer =
@@ -243,6 +278,14 @@ class _ResultScreenState extends State<ResultScreen> {
             descriptor.dispose();
             buffer.dispose();
           } catch (_) {}
+
+          // Store the true original dimensions (pre-downsize).
+          if (mounted) {
+            setState(() {
+              _origWidthList[index] = width;
+              _origHeightList[index] = height;
+            });
+          }
 
           if (width * height > kMaxPixels) {
             if (mounted) setState(() => _wasDownsizedList[index] = true);
@@ -273,14 +316,12 @@ class _ResultScreenState extends State<ResultScreen> {
             workingBytes,
             quality: widget.quality,
           );
-          // This first call to `_handleCompressionSuccess` has no residual/metrics yet.
           await _handleCompressionSuccess(
               index, result, null, fileLength, workingBytes);
 
-          // 2. In the background, compute the heavy stuff (residual, metrics)
-          //    and update the UI again when they're ready.
+          // 2. In the background, compute the heavy stuff.
           _computeAndSetPostProcessData(index, workingBytes, result);
-          return; // Exit the _process function here for the small image path.
+          return;
         }
 
         await _handleCompressionSuccess(index, result, residual, fileLength, workingBytes);
@@ -289,7 +330,6 @@ class _ResultScreenState extends State<ResultScreen> {
 
       // ── DECOMPRESS / ZIP / VIEW MODE ────────────────────────────────
       if (!isZip) {
-        // Plain image picked in decompress mode — just normalize/display
         if (fileLength > kMaxPixels) {
           if (mounted) setState(() => _wasDownsizedList[index] = true);
           workingBytes = await safeDownsizeIfNeeded(workingBytes);
@@ -334,7 +374,6 @@ class _ResultScreenState extends State<ResultScreen> {
       [Uint8List? inputBytes]) async {
     String? resResolution;
     try {
-      // This part is cheap as the result bytes are for a smaller, compressed image.
       final buffer = await ui.ImmutableBuffer.fromUint8List(result);
       final descriptor = await ui.ImageDescriptor.encoded(buffer);
       resResolution = '${descriptor.width} x ${descriptor.height}';
@@ -366,10 +405,10 @@ class _ResultScreenState extends State<ResultScreen> {
         bytes[3] == 0x04;
   }
 
-  /// Decompresses/reconstructs from a ZIP. Downsizes both the lossy
-  /// image and residual before reconstruction if the resolution
-  /// exceeds the safe pixel threshold, to avoid OOM during the
-  /// add-back step.
+  /// Decompresses/reconstructs from a ZIP.
+  /// Reads meta.json (if present) for the original dimensions, then passes
+  /// them to [reconstructFromResidual] so the result is upscaled toward
+  /// the original resolution (capped at [kReconstructUpscaleCap]).
   Future<Uint8List> _decompressFile(int index, Uint8List bytes) async {
     final fileName = widget.files[index].name.toLowerCase();
     if (!fileName.endsWith('.zip') && !_looksLikeZip(bytes)) return bytes;
@@ -381,7 +420,7 @@ class _ResultScreenState extends State<ResultScreen> {
       throw Exception('Could not open ZIP: $e');
     }
 
-    ArchiveFile? lossyFile, residualFile, originalFile;
+    ArchiveFile? lossyFile, residualFile, originalFile, metaFile;
 
     for (final file in archive) {
       if (file.isFile) {
@@ -389,6 +428,7 @@ class _ResultScreenState extends State<ResultScreen> {
         if (n == 'image.webp') lossyFile = file;
         if (n == 'residual.png') residualFile = file;
         if (n == 'original_image') originalFile = file;
+        if (n == 'meta.json') metaFile = file;
       }
     }
 
@@ -409,11 +449,30 @@ class _ResultScreenState extends State<ResultScreen> {
     }
 
     var lossyBytes = Uint8List.fromList(lossyFile.content as List<int>);
-    if (residualFile == null) return lossyBytes;
+    if (residualFile == null) {
+      // No residual in ZIP — this was a large-image-path compress.
+      // We can still upscale the lossy WebP if meta.json has the target dims.
+      if (metaFile != null) {
+        lossyBytes = await _upscaleFromMeta(lossyBytes, metaFile);
+      }
+      return lossyBytes;
+    }
 
     var resBytes = Uint8List.fromList(residualFile.content as List<int>);
 
-    // ── Check dimensions before reconstruction ──
+    // ── Read original dimensions from meta.json ──────────────────────
+    int metaOrigW = 0;
+    int metaOrigH = 0;
+    if (metaFile != null) {
+      try {
+        final metaStr = utf8.decode(metaFile.content as List<int>);
+        final metaMap = jsonDecode(metaStr) as Map<String, dynamic>;
+        metaOrigW = (metaMap['orig_w'] as num?)?.toInt() ?? 0;
+        metaOrigH = (metaMap['orig_h'] as num?)?.toInt() ?? 0;
+      } catch (_) {}
+    }
+
+    // ── Check dimensions before reconstruction ──────────────────────
     int width = 0, height = 0;
     try {
       final buffer = await ui.ImmutableBuffer.fromUint8List(lossyBytes);
@@ -430,7 +489,15 @@ class _ResultScreenState extends State<ResultScreen> {
       resBytes = await safeDownsizeResidual(resBytes);
     }
 
-    final result = await reconstructFromResidual(lossyBytes, resBytes);
+    // ── Reconstruct + upscale ────────────────────────────────────────
+    // Pass the stored original dims so reconstructFromResidual can upscale
+    // the result toward the original resolution (capped at kReconstructUpscaleCap).
+    final result = await reconstructFromResidual(
+      lossyBytes,
+      resBytes,
+      targetWidth: metaOrigW,
+      targetHeight: metaOrigH,
+    );
 
     if (originalFile != null && mounted) {
       final origBytes =
@@ -446,6 +513,43 @@ class _ResultScreenState extends State<ResultScreen> {
     }
 
     return result;
+  }
+
+  /// Upscales [lossyBytes] toward the original dimensions stored in [metaFile],
+  /// capped at [kReconstructUpscaleCap]. Used when a ZIP has no residual
+  /// (large-image path) but does have meta.json.
+  Future<Uint8List> _upscaleFromMeta(
+      Uint8List lossyBytes, ArchiveFile metaFile) async {
+    int metaOrigW = 0;
+    int metaOrigH = 0;
+    try {
+      final metaStr = utf8.decode(metaFile.content as List<int>);
+      final metaMap = jsonDecode(metaStr) as Map<String, dynamic>;
+      metaOrigW = (metaMap['orig_w'] as num?)?.toInt() ?? 0;
+      metaOrigH = (metaMap['orig_h'] as num?)?.toInt() ?? 0;
+    } catch (_) {
+      return lossyBytes; // Can't read meta — return as-is
+    }
+
+    if (metaOrigW <= 0 || metaOrigH <= 0) return lossyBytes;
+
+    // Determine capped upscale target.
+    final isLandscape = metaOrigW >= metaOrigH;
+    int upW, upH;
+    if (isLandscape) {
+      upW = metaOrigW.clamp(1, kReconstructUpscaleCap);
+      upH = (upW * metaOrigH / metaOrigW).round();
+    } else {
+      upH = metaOrigH.clamp(1, kReconstructUpscaleCap);
+      upW = (upH * metaOrigW / metaOrigH).round();
+    }
+
+    // Only upscale if the target is actually larger than what we have.
+    return compute(_upscaleImageTask, {
+      'bytes': lossyBytes,
+      'target_w': upW,
+      'target_h': upH,
+    });
   }
 
   // ── Save helpers ──────────────────────────────────────────────────────────
@@ -536,21 +640,30 @@ class _ResultScreenState extends State<ResultScreen> {
           } else {
             final resultBytes = _resultBytesList[index];
             final residualBytes = _residualBytesList[index];
-            if (resultBytes == null || residualBytes == null) {
-              throw Exception(
-                  'No residual available for this image (large-image path).');
+            // resultBytes must exist; residualBytes may be null for the
+            // large-image (noResidual) path — _encodeZipTask handles null.
+            if (resultBytes == null) {
+              throw Exception('No compressed output available yet.');
             }
 
+            // Include the true original dimensions so decompressors can upscale.
             final encoded = await compute(_encodeZipTask, {
               'result': resultBytes,
-              'residual': residualBytes,
-              'original': await widget.files[index].readAsBytes(),
+              'residual': residualBytes, // may be null — handled in task
+              'orig_w': _origWidthList[index],
+              'orig_h': _origHeightList[index],
+              // Skip bundling the large original when there is no residual —
+              // it would double the ZIP size with no reconstruction benefit.
+              'original': residualBytes != null
+                  ? await widget.files[index].readAsBytes()
+                  : null,
             });
 
             if (encoded == null) throw Exception('Failed to encode ZIP.');
             zipBytes = Uint8List.fromList(encoded);
-            outName =
-                'compressed_with_residual_${DateTime.now().millisecondsSinceEpoch}.zip';
+            outName = residualBytes != null
+                ? 'compressed_with_residual_${DateTime.now().millisecondsSinceEpoch}.zip'
+                : 'compressed_${DateTime.now().millisecondsSinceEpoch}.zip';
           }
 
           if (kIsWeb) {
@@ -582,10 +695,7 @@ class _ResultScreenState extends State<ResultScreen> {
   }
 
   /// Converts the compressed result (WebP/JPEG) to a standard JPEG and
-  /// opens the OS share sheet, so it can be sent through apps like
-  /// Messenger that have inconsistent WebP support. This is purely an
-  /// export/compatibility step — the underlying compression result,
-  /// MSE/SSIM metrics, and ZIP-with-residual flow are unaffected.
+  /// opens the OS share sheet.
   Future<void> _exportAsJpeg(int index) async {
     final result = _resultBytesList[index];
     if (result == null) return;
@@ -743,6 +853,24 @@ class _ResultScreenState extends State<ResultScreen> {
             setState(() => _currentIndex = index),
         itemCount: widget.files.length,
         itemBuilder: (context, index) {
+          // Build a human-readable upscale target label for the UI,
+          // e.g. "→ 8192 × 5872 (capped)" or "→ 21000 × 15158".
+          final origW = _origWidthList[index];
+          final origH = _origHeightList[index];
+          String? upscaleLabel;
+          if (origW > 0 && origH > 0) {
+            final isLandscape = origW >= origH;
+            final capW = isLandscape
+                ? origW.clamp(1, kReconstructUpscaleCap)
+                : (origH.clamp(1, kReconstructUpscaleCap) * origW / origH).round();
+            final capH = isLandscape
+                ? (origW.clamp(1, kReconstructUpscaleCap) * origH / origW).round()
+                : origH.clamp(1, kReconstructUpscaleCap);
+            final capped = capW < origW || capH < origH;
+            upscaleLabel =
+                '→ $capW × $capH${capped ? ' (capped at ${kReconstructUpscaleCap}px)' : ''}';
+          }
+
           return _ResultItemView(
             key: PageStorageKey(index),
             file: widget.files[index],
@@ -760,6 +888,7 @@ class _ResultScreenState extends State<ResultScreen> {
             resultResolution: _resultResolutionList[index],
             mse: _mseList[index],
             ssim: _ssimList[index],
+            upscaleLabel: upscaleLabel,
             onSave: () => _save(index),
             onSaveZip: () => _saveZip(index),
             onExportJpeg: () => _exportAsJpeg(index),
@@ -768,6 +897,32 @@ class _ResultScreenState extends State<ResultScreen> {
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────
+// TOP-LEVEL ISOLATE: upscale a decoded image
+// ─────────────────────────────────────────────
+
+/// Upscales [bytes] to ([target_w], [target_h]) using cubic interpolation.
+/// Runs in a separate isolate via [compute].
+Uint8List _upscaleImageTask(Map<String, dynamic> data) {
+  final bytes = data['bytes'] as Uint8List;
+  final targetW = data['target_w'] as int;
+  final targetH = data['target_h'] as int;
+
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) return bytes;
+
+  // Only upscale if the target is larger on at least one axis.
+  if (targetW <= decoded.width && targetH <= decoded.height) return bytes;
+
+  final resized = img.copyResize(
+    decoded,
+    width: targetW,
+    height: targetH,
+    interpolation: img.Interpolation.cubic,
+  );
+  return Uint8List.fromList(img.encodeJpg(resized, quality: 95));
 }
 
 // ─────────────────────────────────────────────
@@ -945,6 +1100,10 @@ class _ResultItemView extends StatelessWidget {
   final double? mse;
   final double? ssim;
 
+  /// Human-readable label showing what resolution the ZIP will reconstruct to,
+  /// e.g. "→ 8192 × 5872 (capped at 8192px)". Null when not applicable.
+  final String? upscaleLabel;
+
   final VoidCallback onSave;
   final VoidCallback onSaveZip;
   final VoidCallback onExportJpeg;
@@ -966,6 +1125,7 @@ class _ResultItemView extends StatelessWidget {
     required this.resultResolution,
     required this.mse,
     required this.ssim,
+    this.upscaleLabel,
     required this.onSave,
     required this.onSaveZip,
     required this.onExportJpeg,
@@ -1187,7 +1347,6 @@ class _ResultItemView extends StatelessWidget {
               _InfoRow(label: 'Resolution', value: resultResolution!),
             ],
             if (isCompress && !noResidual) ...[
-              // For compression, show metrics when available, or a loading indicator.
               if (mse != null && ssim != null) ...[
                 const SizedBox(height: 4),
                 _InfoRow(
@@ -1202,7 +1361,6 @@ class _ResultItemView extends StatelessWidget {
                 const _InfoRow(label: 'SSIM (vs Input)', value: 'Calculating...'),
               ]
             ] else if (isZipDecompress) ...[
-              // For ZIP decompression, show metrics only if they were in the ZIP.
               if (mse != null && ssim != null) ...[
                 const SizedBox(height: 4),
                 _InfoRow(
@@ -1226,6 +1384,33 @@ class _ResultItemView extends StatelessWidget {
                     : Colors.orangeAccent,
               ),
             ],
+            // ── Upscale info banner ──────────────────────────────────
+            if (isCompress && upscaleLabel != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0F2744),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: const Color(0xFF3B82F6).withOpacity(0.35)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.open_in_full_rounded,
+                        color: Color(0xFF3B82F6), size: 16),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Reconstruction will upscale $upscaleLabel',
+                        style: const TextStyle(
+                            color: Color(0xFF93C5FD), fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             if (isCompress && noResidual) ...[
               const SizedBox(height: 12),
               Container(
@@ -1237,8 +1422,8 @@ class _ResultItemView extends StatelessWidget {
                 ),
                 child: const Text(
                   'Residual-based reconstruction is unavailable for images '
-                  'above 30 MB to ensure stable performance. Only the '
-                  'compressed output is provided for this image.',
+                  'above 30 MB to ensure stable performance. The ZIP will '
+                  'contain the compressed output and dimensions metadata for upscaling.',
                   style: TextStyle(color: Colors.white54, fontSize: 12),
                 ),
               ),
@@ -1284,15 +1469,19 @@ class _ResultItemView extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 12),
-            if ((isCompress && residualBytes != null) ||
-                isZipDecompress) ...[
+            // Show ZIP button for:
+            //   - Compress: always (residual available OR noResidual with meta)
+            //   - Decompress of a ZIP: show the original ZIP download
+            if (isCompress || isZipDecompress) ...[
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
                   onPressed: onSaveZip,
                   icon: const Icon(Icons.archive_rounded, size: 18),
                   label: Text(isCompress
-                      ? 'Download ZIP (WebP + Residual)'
+                      ? (noResidual
+                          ? 'Download ZIP (WebP + Metadata)'
+                          : 'Download ZIP (WebP + Residual)')
                       : 'Download Original ZIP'),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF353535),
