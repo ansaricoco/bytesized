@@ -49,9 +49,44 @@ List<int>? _encodeZipTask(Map<String, dynamic> data) {
 
   if (data['original'] != null) {
     final original = data['original'] as Uint8List;
-    archive.addFile(ArchiveFile('original_image', original.length, original));
+    // Detect the actual format from the file's magic bytes so the ZIP
+    // entry gets a proper extension and can be opened directly by any
+    // image viewer, instead of a bare "original_image" with no extension.
+    final ext = _detectImageExtension(original);
+    archive.addFile(
+        ArchiveFile('original_image.$ext', original.length, original));
   }
   return ZipEncoder().encode(archive);
+}
+
+/// Sniffs the first few bytes of [bytes] to determine its image format,
+/// so we can give the ZIP entry a real file extension.
+String _detectImageExtension(Uint8List bytes) {
+  if (bytes.length < 12) return 'bin';
+
+  // PNG: 89 50 4E 47
+  if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
+    return 'png';
+  }
+  // JPEG: FF D8 FF
+  if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+    return 'jpg';
+  }
+  // WebP: "RIFF" .... "WEBP"
+  if (bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 &&
+      bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) {
+    return 'webp';
+  }
+  // GIF: "GIF8"
+  if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
+    return 'gif';
+  }
+  // BMP: "BM"
+  if (bytes[0] == 0x42 && bytes[1] == 0x4D) {
+    return 'bmp';
+  }
+
+  return 'bin'; // Unknown format — at least won't crash the ZIP encode.
 }
 
 Archive _decodeZipTask(Uint8List bytes) {
@@ -427,7 +462,9 @@ class _ResultScreenState extends State<ResultScreen> {
         final n = file.name.toLowerCase();
         if (n == 'image.webp') lossyFile = file;
         if (n == 'residual.png') residualFile = file;
-        if (n == 'original_image') originalFile = file;
+        if (n == 'original_image' || n.startsWith('original_image.')) {
+          originalFile = file;
+        }
         if (n == 'meta.json') metaFile = file;
       }
     }
@@ -449,6 +486,17 @@ class _ResultScreenState extends State<ResultScreen> {
     }
 
     var lossyBytes = Uint8List.fromList(lossyFile.content as List<int>);
+
+    // ── Show a preview of the archive's contents instead of a generic ──
+    // ZIP icon. Prefer the true original image if it was bundled; fall
+    // back to the lossy WebP/JPEG otherwise (e.g. large-image path).
+    if (mounted) {
+      final previewBytes = originalFile != null
+          ? Uint8List.fromList(originalFile.content as List<int>)
+          : lossyBytes;
+      setState(() => _inputDisplayBytesList[index] = previewBytes);
+    }
+
     if (residualFile == null) {
       // No residual in ZIP — this was a large-image-path compress.
       // We can still upscale the lossy WebP if meta.json has the target dims.
@@ -573,7 +621,7 @@ class _ResultScreenState extends State<ResultScreen> {
                   _looksLikeZip(rawBytes));
 
           final ext = isCompress
-              ? (Platform.isIOS ? '.jpg' : '.webp')
+              ? ((!kIsWeb && Platform.isIOS) ? '.jpg' : '.webp')
               : (isZipDecompress
                   ? '.jpg'
                   : '.${fileName.split('.').last}');
@@ -588,7 +636,7 @@ class _ResultScreenState extends State<ResultScreen> {
             return 'Image download started.';
           } else {
             Uint8List bytesToSave = result;
-            if (isCompress && Platform.isIOS) {
+            if (isCompress && !kIsWeb && Platform.isIOS) {
               try {
                 final decoded = await compute(_decodeToJpegTask, result);
                 if (decoded != null) bytesToSave = decoded;
@@ -675,7 +723,7 @@ class _ResultScreenState extends State<ResultScreen> {
           final file = File('${tempDir.path}/$outName');
           await file.writeAsBytes(zipBytes);
 
-          if (Platform.isIOS) {
+          if (!kIsWeb && Platform.isIOS) {
             await Share.shareXFiles(
               [XFile(file.path, mimeType: 'application/zip')],
               subject: outName,
@@ -764,7 +812,7 @@ class _ResultScreenState extends State<ResultScreen> {
                 !isCompress && fileName.toLowerCase().endsWith('.zip');
 
             final ext = isCompress
-                ? (Platform.isIOS ? '.jpg' : '.webp')
+                ? ((!kIsWeb && Platform.isIOS) ? '.jpg' : '.webp')
                 : (isZipDecompress
                     ? '.jpg'
                     : '.${fileName.split('.').last}');
@@ -778,7 +826,7 @@ class _ResultScreenState extends State<ResultScreen> {
               downloadBytes(result, outName);
             } else {
               Uint8List bytesToSave = result;
-              if (isCompress && Platform.isIOS) {
+              if (isCompress && !kIsWeb && Platform.isIOS) {
                 try {
                   final decoded =
                       await compute(_decodeToJpegTask, result);
@@ -1167,7 +1215,7 @@ class _ResultItemView extends StatelessWidget {
     final isJustViewing = !isCompress && !isZipDecompress;
 
     final outputFormatLabel = isCompress
-        ? (Platform.isIOS ? 'JPG' : 'WEBP')
+        ? ((!kIsWeb && Platform.isIOS) ? 'JPG' : 'WEBP')
         : (isZipDecompress
             ? 'JPG'
             : fileName.split('.').last.toUpperCase());
@@ -1210,7 +1258,8 @@ class _ResultItemView extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-            if (fileName.toLowerCase().endsWith('.zip'))
+            if (fileName.toLowerCase().endsWith('.zip') &&
+                inputBytesForDisplay == null)
               Container(
                 width: double.infinity,
                 height: 200,
@@ -1224,7 +1273,7 @@ class _ResultItemView extends StatelessWidget {
                     Icon(Icons.folder_zip_rounded,
                         size: 64, color: Color(0xFF818CF8)),
                     SizedBox(height: 12),
-                    Text('ZIP Archive',
+                    Text('Extracting preview...',
                         style: TextStyle(color: Colors.white70)),
                   ],
                 ),

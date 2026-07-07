@@ -340,7 +340,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     .withOpacity(0.4)),
                           ),
                           child: Text(
-                            '$_quality',
+                            '$_quality%',
                             style: const TextStyle(
                                 color: Color(0xFF3B82F6),
                                 fontSize: 13,
